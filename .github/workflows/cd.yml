@@ -1,0 +1,152 @@
+name: Enterprise Continuous Deployment
+
+on:
+  workflow_run:
+    workflows: ["Enterprise CI/CD Pipeline"]
+    branches: [main, develop]
+    types:
+      - completed
+
+jobs:
+  deploy-dev:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'develop' }}
+    runs-on: ubuntu-latest
+    environment: development
+    concurrency: 
+      group: deploy-dev-${{ github.ref }}
+      cancel-in-progress: true
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.AWS_REGION }}
+    
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+    
+    - name: Build and push Docker image
+      run: |
+        cd app
+        docker build -t ${{ secrets.ECR_REGISTRY }}/enterprise-devops-app:${{ github.sha }} .
+        docker push ${{ secrets.ECR_REGISTRY }}/enterprise-devops-app:${{ github.sha }}
+        docker tag ${{ secrets.ECR_REGISTRY }}/enterprise-devops-app:${{ github.sha }} ${{ secrets.ECR_REGISTRY }}/enterprise-devops-app:latest-dev
+        docker push ${{ secrets.ECR_REGISTRY }}/enterprise-devops-app:latest-dev
+    
+    - name: Update k8s deployment
+      run: |
+        aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER_NAME_DEV }} --region ${{ vars.AWS_REGION }}
+        # Deploy Redis if not exists
+        kubectl apply -f k8s/redis-deployment.yaml --namespace=default || true
+        # Update application
+        kubectl set image deployment/enterprise-devops-app \
+          app=${{ secrets.ECR_REGISTRY }}/enterprise-devops-app:${{ github.sha }} \
+          -n default
+        kubectl rollout status deployment/enterprise-devops-app -n default --timeout=300s
+    
+    - name: Run smoke tests
+      run: |
+        # Wait for service to be ready
+        sleep 30
+        SERVICE_URL=$(kubectl get svc enterprise-devops-app-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+        curl -f http://$SERVICE_URL/health || exit 1
+        curl -f http://$SERVICE_URL/ | grep "Enterprise DevOps"
+    
+    - name: Trigger integration tests
+      run: |
+        curl -X POST \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/dispatches \
+          -d '{"event_type": "run-integration-tests", "client_payload": {"environment": "dev", "image": "${{ github.sha }}"}}'
+
+  deploy-staging:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    needs: deploy-dev
+    concurrency: 
+      group: deploy-staging
+      cancel-in-progress: true
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Wait for manual approval
+      uses: trstringer/manual-approval@v1
+      with:
+        secret: ${{ github.token }}
+        approvers: ${{ vars.APPROVERS }}
+        minimum-approvals: 2
+        approved-label: deployment-approved
+    
+    - name: Deploy to staging
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.repos.createDeployment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            ref: context.sha,
+            environment: 'staging',
+            auto_merge: false,
+            required_contexts: []
+          })
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production
+    needs: deploy-staging
+    concurrency: 
+      group: deploy-production
+      cancel-in-progress: false
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Blue-green deployment preparation
+      run: |
+        # Clone current production deployment
+        kubectl get deployment enterprise-devops-app -n production -o yaml > production-deployment.yaml
+        sed -i 's/name: enterprise-devops-app/name: enterprise-devops-app-green/g' production-deployment.yaml
+        sed -i 's/app: enterprise-devops-app/app: enterprise-devops-app-green/g' production-deployment.yaml
+    
+    - name: Deploy green deployment
+      run: |
+        aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER_NAME_PROD }} --region ${{ vars.AWS_REGION }}
+        kubectl apply -f production-deployment.yaml -n production
+        kubectl rollout status deployment/enterprise-devops-app-green -n production --timeout=300s
+    
+    - name: Test green deployment
+      run: |
+        # Run comprehensive tests against green deployment
+        ./scripts/test-deployment.sh --environment=green
+    
+    - name: Switch traffic to green
+      run: |
+        kubectl patch service enterprise-devops-app-service -n production -p '{"spec":{"selector":{"app":"enterprise-devops-app-green"}}}'
+        sleep 60 # Wait for connections to drain
+    
+    - name: Clean up blue deployment
+      run: |
+        kubectl delete deployment enterprise-devops-app -n production --cascade=foreground
+    
+    - name: Update deployment tracker
+      run: |
+        curl -X POST \
+          -H "Content-Type: application/json" \
+          -d "{\"version\": \"${{ github.sha }}\", \"environment\": \"production\", \"timestamp\": \"$(date -Iseconds)\", \"deployed_by\": \"${{ github.actor }}\"}" \
+          ${{ vars.DEPLOYMENT_WEBHOOK }}
+    
+    - name: Notify deployment success
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        text: "Production deployment successful: ${{ github.sha }}"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
