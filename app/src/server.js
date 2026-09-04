@@ -283,6 +283,17 @@ app.get('/api/v1/products', async (req, res) => {
     });
   }
 });
+// Set a cache value (used by integration tests + manual seeding)
+app.post('/api/v1/cache/:key', async (req, res) => {
+  try {
+    const redisClient = redisPool.getClient(0);
+    const ttl = Number(req.query.ttl) || 300;
+    await redisClient.setEx(req.params.key, ttl, JSON.stringify(req.body));
+    res.json({ key: req.params.key, value: req.body, stored: true, ttl });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Cache management endpoints
 app.get('/api/v1/cache/:key', async (req, res) => {
@@ -368,13 +379,14 @@ app.get('/api/v1/error', (req, res) => {
         res.status(504).json({ error: 'Request timeout' });
       }, 5000);
       break;
-    case 'memory':
+    case 'memory': {
       const largeArray = [];
       for(let i = 0; i < 1000000; i++) {
         largeArray.push(new Array(1000).join('x'));
       }
       res.json({ message: 'Memory test completed', arraySize: largeArray.length });
       break;
+    }
     case 'circuit':
       externalApiBreaker.open();
       res.json({ message: 'Circuit breaker manually opened' });
@@ -489,12 +501,15 @@ const gracefulShutdown = async () => {
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
 
-const server = app.listen(port, () => {
-  logger.info(`Enterprise DevOps App running on port ${port}`, {
-    environment: process.env.NODE_ENV || 'development',
-    version: process.env.APP_VERSION || '1.0.0',
-    nodeVersion: process.version
+let server;
+if (require.main === module) {
+  server = app.listen(port, () => {
+    logger.info(`Enterprise DevOps App running on port ${port}`, {
+      environment: process.env.NODE_ENV || 'development',
+      version: process.env.APP_VERSION || '1.0.0',
+      nodeVersion: process.version
+    });
   });
-});
+}
 
 module.exports = app;

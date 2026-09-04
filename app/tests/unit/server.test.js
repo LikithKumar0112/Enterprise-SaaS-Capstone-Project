@@ -2,9 +2,10 @@ const request = require('supertest');
 const app = require('../../src/server');
 const { createClient } = require('redis');
 
-// Mock Redis
-jest.mock('redis', () => ({
-  createClient: jest.fn(() => ({
+// Mock Redis — return the same client instance on every createClient() call,
+// since the app pools and reuses a single client internally.
+jest.mock('redis', () => {
+  const mockClient = {
     connect: jest.fn(),
     get: jest.fn(),
     setEx: jest.fn(),
@@ -13,8 +14,9 @@ jest.mock('redis', () => ({
     info: jest.fn(() => 'used_memory:1048576'),
     on: jest.fn(),
     del: jest.fn()
-  }))
-}));
+  };
+  return { createClient: jest.fn(() => mockClient) };
+});
 
 describe('Enterprise DevOps Application - Unit Tests', () => {
   beforeAll(() => {
@@ -72,19 +74,6 @@ describe('Enterprise DevOps Application - Unit Tests', () => {
     });
   });
 
-  describe('Rate limiting', () => {
-    it('should enforce rate limits', async () => {
-      // Make multiple requests quickly
-      const requests = Array(101).fill().map(() => 
-        request(app).get('/')
-      );
-      
-      const responses = await Promise.all(requests);
-      const rateLimited = responses.filter(r => r.statusCode === 429);
-      expect(rateLimited.length).toBeGreaterThan(0);
-    });
-  });
-
   describe('Request ID middleware', () => {
     it('should generate request ID if not provided', async () => {
       const res = await request(app).get('/');
@@ -110,6 +99,22 @@ describe('Enterprise DevOps Application - Unit Tests', () => {
     it('should return 404 for unknown routes', async () => {
       const res = await request(app).get('/unknown-route');
       expect(res.statusCode).toEqual(404);
+    });
+  });
+
+  // Runs last: intentionally trips the rate limiter, which then stays
+  // tripped for the rest of the process since the limiter's store is
+  // shared across requests to the same app instance.
+  describe('Rate limiting', () => {
+    it('should enforce rate limits', async () => {
+      // Make multiple requests quickly
+      const requests = Array(101).fill().map(() =>
+        request(app).get('/')
+      );
+
+      const responses = await Promise.all(requests);
+      const rateLimited = responses.filter(r => r.statusCode === 429);
+      expect(rateLimited.length).toBeGreaterThan(0);
     });
   });
 });
