@@ -1,7 +1,21 @@
-FROM node:18-alpine
+# ---------- Stage 1: production dependencies ----------
+FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --production
-COPY . .
+RUN npm ci --omit=dev
+
+# ---------- Stage 2: runtime ----------
+FROM node:20-alpine AS runtime
+WORKDIR /app
+RUN apk add --no-cache dumb-init && \
+    addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 && \
+    mkdir -p /app/logs && chown -R nodejs:nodejs /app
+COPY --from=deps --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --chown=nodejs:nodejs . .
+USER nodejs
 EXPOSE 3000
-CMD  ["node", "server.js"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/health',r=>process.exit([200,503].includes(r.statusCode)?0:1)).on('error',()=>process.exit(1))"
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "server.js"]

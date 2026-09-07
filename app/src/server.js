@@ -196,14 +196,17 @@ app.get('/health', async (req, res) => {
     });
   }
 
-  const overallStatus = Object.values(checks.dependencies).every(v => v === 'healthy') ? 200 : 503;
+  // Only Redis is a real dependency of this deployment (the external API
+  // check above is informational) - gating pod liveness/readiness on a
+  // third-party demo endpoint means an unrelated outage crash-loops us.
+  const overallStatus = checks.dependencies.redis === 'healthy' ? 200 : 503;
   res.status(overallStatus).json(checks);
 });
 
 // Main endpoint
 app.get('/', (req, res) => {
   res.json({
-    message: 'Welcome to Enterprise DevOps Application',
+    message: 'Welcome to Enterprise DevOps Application - v3 rolling update demo',
     environment: process.env.NODE_ENV || 'development',
     requestId: req.id,
     features: [

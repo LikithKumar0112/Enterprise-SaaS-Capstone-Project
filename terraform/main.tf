@@ -17,11 +17,16 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.5"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
-  
+
+  # Using the existing state bucket + lock table created in Phase 4.
   backend "s3" {
-    bucket         = "enterprise-devops-tfstate"
-    key            = "production/terraform.tfstate"
+    bucket         = "capstone-tf-bucket"
+    key            = "development/terraform.tfstate"
     region         = "us-east-1"
     encrypt        = true
     dynamodb_table = "terraform-state-lock"
@@ -30,14 +35,13 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
-  
+
   default_tags {
     tags = {
-      Environment   = var.environment
-      Project       = "Enterprise-DevOps-Capstone"
-      ManagedBy     = "Terraform"
-      CostCenter    = var.cost_center
-      CreationDate  = timestamp()
+      Environment = var.environment
+      Project     = "Enterprise-DevOps-Capstone"
+      ManagedBy   = "Terraform"
+      CostCenter  = var.cost_center
     }
   }
 }
@@ -49,33 +53,50 @@ resource "random_password" "redis_auth" {
   override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
+# App secrets (Redis auth token, etc.) - the app service account reads
+# this at runtime instead of having credentials baked into the image.
+resource "aws_secretsmanager_secret" "app_secrets" {
+  name        = "enterprise-devops-app-secrets-${var.environment}"
+  description = "Runtime secrets for the enterprise-devops-app"
+}
+
+resource "aws_secretsmanager_secret_version" "app_secrets" {
+  secret_id = aws_secretsmanager_secret.app_secrets.id
+  secret_string = jsonencode({
+    redis_auth_token = random_password.redis_auth.result
+  })
+}
+
 # VPC Module
 module "vpc" {
   source = "./modules/vpc"
-  
+
   vpc_cidr           = var.vpc_cidr
-  availability_zones = var.availability_zones
+  availability_zones = ["us-east-1a", "us-east-1b"]
   environment        = var.environment
   enable_nat_gateway = true
-  single_nat_gateway = false
+  single_nat_gateway = true # ONE NAT for all AZs — saves ~$64/mo
 }
 
 # EKS Module
 module "eks" {
   source = "./modules/eks"
-  
+
   cluster_name    = "${var.cluster_name}-${var.environment}"
   cluster_version = var.cluster_version
   vpc_id          = module.vpc.vpc_id
   subnet_ids      = module.vpc.private_subnets
   environment     = var.environment
-  
+
   node_groups = var.node_groups
-  
+
   # IRSA for service accounts
   enable_irsa = true
-  
+
   # Addon configurations
+  # NOTE: aws-ebs-csi-driver is intentionally left out - nothing in this
+  # app uses PersistentVolumeClaims, and the addon needs its own IAM role
+  # (IRSA) to work properly, which adds complexity for no benefit here.
   cluster_addons = {
     coredns = {
       most_recent = true
@@ -84,9 +105,6 @@ module "eks" {
       most_recent = true
     }
     vpc-cni = {
-      most_recent = true
-    }
-    aws-ebs-csi-driver = {
       most_recent = true
     }
   }
@@ -108,18 +126,6 @@ resource "aws_ecr_lifecycle_policy" "app_lifecycle" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep last 30 images"
-      selection = {
-        tagStatus   = "any"
-        countType   = "imageCountMoreThan"
-        countNumber = 30
-      }
-      action = {
-        type = "expire"
-      }
-    },
-    {
-      rulePriority = 2
       description  = "Expire untagged images older than 7 days"
       selection = {
         tagStatus   = "untagged"
@@ -130,27 +136,43 @@ resource "aws_ecr_lifecycle_policy" "app_lifecycle" {
       action = {
         type = "expire"
       }
+      },
+      {
+        # tagStatus "any" must be the highest rulePriority (evaluated last) -
+        # AWS rejects a policy where it isn't.
+        rulePriority = 2
+        description  = "Keep last 30 images"
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 30
+        }
+        action = {
+          type = "expire"
+        }
     }]
   })
 }
 
-# Elasticache Redis for production
+# Elasticache Redis (disabled by default - see k8s/redis-deployment.yaml
+# for the in-cluster Redis this app uses instead; set enable_redis = true
+# only if you want to move Redis to a managed AWS service)
 resource "aws_elasticache_cluster" "redis" {
   count = var.enable_redis ? 1 : 0
-  
+
   cluster_id           = "devops-redis-${var.environment}"
-  engine              = "redis"
-  node_type           = var.redis_node_type
-  num_cache_nodes     = 1
+  engine               = "redis"
+  node_type            = var.redis_node_type
+  num_cache_nodes      = 1
   parameter_group_name = "default.redis7"
-  engine_version      = "7.0"
-  port                = 6379
-  subnet_group_name   = aws_elasticache_subnet_group.redis[0].name
-  security_group_ids  = [aws_security_group.redis[0].id]
-  
+  engine_version       = "7.0"
+  port                 = 6379
+  subnet_group_name    = aws_elasticache_subnet_group.redis[0].name
+  security_group_ids   = [aws_security_group.redis[0].id]
+
   snapshot_retention_limit = 7
   maintenance_window       = "sun:05:00-sun:09:00"
-  
+
   tags = {
     Name        = "devops-redis-${var.environment}"
     Environment = var.environment
@@ -159,18 +181,18 @@ resource "aws_elasticache_cluster" "redis" {
 
 resource "aws_elasticache_subnet_group" "redis" {
   count = var.enable_redis ? 1 : 0
-  
+
   name       = "redis-subnet-group-${var.environment}"
   subnet_ids = module.vpc.private_subnets
 }
 
 resource "aws_security_group" "redis" {
   count = var.enable_redis ? 1 : 0
-  
+
   name        = "redis-sg-${var.environment}"
   description = "Security group for Redis"
   vpc_id      = module.vpc.vpc_id
-  
+
   ingress {
     description     = "Redis from EKS"
     from_port       = 6379
@@ -178,7 +200,7 @@ resource "aws_security_group" "redis" {
     protocol        = "tcp"
     security_groups = [module.eks.cluster_primary_security_group_id]
   }
-  
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -261,11 +283,9 @@ resource "aws_iam_role_policy_attachment" "app_permissions" {
   policy_arn = aws_iam_policy.app_permissions.arn
 }
 
-# CloudWatch Log Group with retention
-resource "aws_cloudwatch_log_group" "eks_logs" {
-  name              = "/aws/eks/${module.eks.cluster_name}/cluster"
-  retention_in_days = 30
-}
+# NOTE: no separate EKS cluster log group here - the EKS module already
+# creates and manages "/aws/eks/<cluster-name>/cluster" itself when cluster
+# logging is enabled, so a second resource with the same name would collide.
 
 resource "aws_cloudwatch_log_group" "app_logs" {
   name              = "/aws/ecs/enterprise-devops-app-${var.environment}"
@@ -277,14 +297,14 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu" {
   alarm_name          = "eks-high-cpu-${var.environment}"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = "2"
-  metric_name        = "CPUUtilization"
-  namespace          = "AWS/EKS"
-  period             = "300"
-  statistic          = "Average"
-  threshold          = "80"
-  alarm_description  = "This metric monitors EKS cluster CPU utilization"
-  alarm_actions      = [aws_sns_topic.alerts.arn]
-  ok_actions         = [aws_sns_topic.alerts.arn]
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EKS"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "80"
+  alarm_description   = "This metric monitors EKS cluster CPU utilization"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
 
   dimensions = {
     ClusterName = module.eks.cluster_name
@@ -295,14 +315,14 @@ resource "aws_cloudwatch_metric_alarm" "low_memory" {
   alarm_name          = "eks-low-memory-${var.environment}"
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = "2"
-  metric_name        = "MemoryAvailable"
-  namespace          = "ContainerInsights"
-  period             = "300"
-  statistic          = "Average"
-  threshold          = "1073741824" # 1GB
-  alarm_description  = "This metric monitors available memory"
-  alarm_actions      = [aws_sns_topic.alerts.arn]
-  ok_actions         = [aws_sns_topic.alerts.arn]
+  metric_name         = "MemoryAvailable"
+  namespace           = "ContainerInsights"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "1073741824" # 1GB
+  alarm_description   = "This metric monitors available memory"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
 
   dimensions = {
     ClusterName = module.eks.cluster_name
@@ -327,7 +347,7 @@ resource "aws_budgets_budget" "monthly" {
   limit_amount      = "100"
   limit_unit        = "USD"
   time_unit         = "MONTHLY"
-  time_period_start = "2024-01-01_00:00"
+  time_period_start = "2026-08-01_00:00"
 
   cost_types {
     include_credit             = true
@@ -351,63 +371,6 @@ resource "aws_budgets_budget" "monthly" {
   }
 }
 
-# AWS Cost and Usage Report
-resource "aws_cur_report_definition" "devops_cost_report" {
-  report_name                = "devops-cost-report"
-  time_unit                  = "HOURLY"
-  format                     = "textORcsv"
-  compression                = "GZIP"
-  additional_schema_elements = ["RESOURCES"]
-  s3_bucket                  = aws_s3_bucket.cost_reports.bucket
-  s3_prefix                  = "cost-reports"
-  s3_region                  = var.aws_region
-  additional_artifacts       = ["REDSHIFT", "QUICKSIGHT"]
-  refresh_closed_reports     = true
-  report_versioning          = "CREATE_NEW_REPORT"
-}
-
-resource "aws_s3_bucket" "cost_reports" {
-  bucket = "devops-cost-reports-${random_id.bucket_suffix.hex}"
-  
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-resource "aws_s3_bucket_policy" "cost_reports_policy" {
-  bucket = aws_s3_bucket.cost_reports.id
-  policy = data.aws_iam_policy_document.cost_reports_policy.json
-}
-
-data "aws_iam_policy_document" "cost_reports_policy" {
-  statement {
-    effect = "Allow"
-    principals {
-      type        = "Service"
-      identifiers = ["billingreports.amazonaws.com"]
-    }
-    actions = [
-      "s3:GetBucketAcl",
-      "s3:GetBucketPolicy"
-    ]
-    resources = [aws_s3_bucket.cost_reports.arn]
-  }
-  
-  statement {
-    effect = "Allow"
-    principals {
-      type        = "Service"
-      identifiers = ["billingreports.amazonaws.com"]
-    }
-    actions = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.cost_reports.arn}/*"]
-  }
-}
-
-resource "random_id" "bucket_suffix" {
-  byte_length = 8
-}
-
 output "cluster_endpoint" {
   value       = module.eks.cluster_endpoint
   description = "EKS Cluster endpoint"
@@ -426,9 +389,4 @@ output "redis_endpoint" {
 output "sns_topic_arn" {
   value       = aws_sns_topic.alerts.arn
   description = "SNS topic ARN for alerts"
-}
-
-output "cost_report_bucket" {
-  value       = aws_s3_bucket.cost_reports.bucket
-  description = "S3 bucket for cost reports"
 }
