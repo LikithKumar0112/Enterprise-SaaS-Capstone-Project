@@ -1,0 +1,32 @@
+replicaCount: 2
+
+image:
+  repository: PLACEHOLDER_ECR_URL
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+  targetPort: 3000
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits:   { cpu: 500m, memory: 512Mi }
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+ingress:
+  enabled: true
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+env:
+  NODE_ENV: production
+  REDIS_URL: redis://redis-service:6379
+  PORT: "3000"

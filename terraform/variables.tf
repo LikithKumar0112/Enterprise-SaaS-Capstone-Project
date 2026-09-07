@@ -13,13 +13,13 @@ variable "environment" {
 variable "cluster_name" {
   description = "EKS cluster name"
   type        = string
-  default     = "enterprise-devops-cluster"
+  default     = "devops-app"
 }
 
 variable "cluster_version" {
   description = "Kubernetes version"
   type        = string
-  default     = "1.27"
+  default     = "1.34"
 }
 
 variable "vpc_cidr" {
@@ -63,26 +63,19 @@ variable "node_groups" {
   }))
   default = {
     spot = {
-      instance_type = "t3.medium"
-      min_size      = 2
-      max_size      = 10
-      desired_size  = 3
-      spot          = true
-    }
-    on_demand = {
-      instance_type = "t3.medium"
+      instance_type = "t3.small"
       min_size      = 1
       max_size      = 3
-      desired_size  = 2
-      spot          = false
+      desired_size  = 1
+      spot          = true
     }
   }
 }
 
 variable "enable_redis" {
-  description = "Enable Redis deployment"
+  description = "Use AWS ElastiCache (true) or in-cluster Redis (false)"
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "redis_node_type" {
