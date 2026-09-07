@@ -1,0 +1,6 @@
+apiVersion: v2
+name: saas-app
+description: Enterprise SaaS DevOps Capstone application
+type: application
+version: 0.1.0
+appVersion: "2.0.0"
