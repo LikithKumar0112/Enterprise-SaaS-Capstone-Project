@@ -8,6 +8,23 @@ const CircuitBreaker = require('opossum');
 const { v4: uuidv4 } = require('uuid');
 const winston = require('winston');
 const axios = require('axios');
+const client = require('prom-client');
+const register = new client.Registry();
+client.collectDefaultMetrics({ register });
+
+const httpRequests = new client.Counter({
+  name: 'http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'route', 'status'],
+  registers: [register],
+});
+const httpDuration = new client.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'route', 'status'],
+  buckets: [0.05, 0.1, 0.3, 0.5, 1, 2],
+  registers: [register],
+});
 
 // Configure Winston logger
 const logger = winston.createLogger({
@@ -90,6 +107,17 @@ const port = process.env.PORT || 3000;
 app.use((req, res, next) => {
   req.id = req.headers['x-request-id'] || uuidv4();
   res.setHeader('x-request-id', req.id);
+  next();
+});
+
+app.use((req, res, next) => {
+  const end = httpDuration.startTimer();
+  res.on('finish', () => {
+    const route = req.route ? req.route.path : req.path;
+    const labels = { method: req.method, route, status: res.statusCode };
+    httpRequests.inc(labels);
+    end(labels);
+  });
   next();
 });
 
@@ -402,43 +430,8 @@ app.get('/api/v1/error', (req, res) => {
 
 // Metrics endpoint (Prometheus format)
 app.get('/metrics', async (req, res) => {
-  const redisClient = redisPool.getClient(0);
-  const info = await redisClient.info('memory');
-  const memoryInfo = info.split('\n').find(line => line.startsWith('used_memory:')) || '';
-  
-  res.set('Content-Type', 'text/plain');
-  res.send(`
-# HELP http_requests_total Total HTTP requests
-# TYPE http_requests_total counter
-http_requests_total{method="GET",handler="/health"} 42
-http_requests_total{method="GET",handler="/"} 156
-http_requests_total{method="GET",handler="/api/v1/products"} 89
-
-# HELP app_version Application version
-# TYPE app_version gauge
-app_version{version="${process.env.APP_VERSION || '1.0.0'}"} 1
-
-# HELP memory_usage Memory usage in bytes
-# TYPE memory_usage gauge
-memory_usage{type="heap"} ${process.memoryUsage().heapUsed}
-
-# HELP circuit_breaker_state Circuit breaker state (0=closed, 1=open)
-# TYPE circuit_breaker_state gauge
-circuit_breaker_state ${externalApiBreaker.opened ? 1 : 0}
-
-# HELP redis_memory_usage Redis memory usage in bytes
-# TYPE redis_memory_usage gauge
-redis_memory_usage ${memoryInfo.split(':')[1] || 0}
-
-# HELP http_response_time_seconds HTTP response time
-# TYPE http_response_time_seconds histogram
-http_response_time_seconds_bucket{le="0.1"} 100
-http_response_time_seconds_bucket{le="0.5"} 200
-http_response_time_seconds_bucket{le="1"} 250
-http_response_time_seconds_bucket{le="+Inf"} 300
-http_response_time_seconds_sum 45.6
-http_response_time_seconds_count 300
-  `);
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
 });
 
 // Error handling middleware

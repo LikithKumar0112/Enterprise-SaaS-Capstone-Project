@@ -28,30 +28,6 @@ variable "vpc_cidr" {
   default     = "10.0.0.0/16"
 }
 
-variable "availability_zones" {
-  description = "AWS availability zones"
-  type        = list(string)
-  default     = ["us-east-1a", "us-east-1b", "us-east-1c"]
-}
-
-variable "enable_spot_instances" {
-  description = "Enable spot instances for cost optimization"
-  type        = bool
-  default     = true
-}
-
-variable "spot_instance_types" {
-  description = "Spot instance types"
-  type        = list(string)
-  default     = ["t3.medium", "t3a.medium", "m5.large", "m5a.large"]
-}
-
-variable "on_demand_instance_types" {
-  description = "On-demand instance types"
-  type        = list(string)
-  default     = ["t3.medium", "t3a.medium"]
-}
-
 variable "node_groups" {
   description = "EKS node group configurations"
   type = map(object({
@@ -82,12 +58,6 @@ variable "redis_node_type" {
   description = "Redis node type"
   type        = string
   default     = "cache.t3.micro"
-}
-
-variable "enable_monitoring" {
-  description = "Enable enhanced monitoring"
-  type        = bool
-  default     = true
 }
 
 variable "alert_email" {
