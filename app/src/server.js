@@ -206,7 +206,7 @@ app.get('/health', async (req, res) => {
 // Main endpoint
 app.get('/', (req, res) => {
   res.json({
-    message: 'Welcome to Enterprise DevOps Application - Pipeline dry-run',
+    message: 'Welcome to Enterprise DevOps Application - Pipeline dry-run v2',
     environment: process.env.NODE_ENV || 'development',
     requestId: req.id,
     features: [
