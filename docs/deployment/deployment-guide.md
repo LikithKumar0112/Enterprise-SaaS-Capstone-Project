@@ -18,6 +18,21 @@ push to develop ──► CD: deploy-dev ─────────────
 push to main ─────► CD: deploy-production ──►[approval]──► production environment
 ```
 
+The CI workflow (`test` → `build`, with `security` in parallel) passing on a PR:
+
+![GitHub Actions CI — test, security and build jobs succeeded](../images/ci-pipeline.png)
+
+CI green on the PR into `develop`:
+
+![CI success on the merge to develop](../images/cd-merge-develop.png)
+
+### Secret scanning (pre-commit)
+
+Beyond the pipeline, `gitleaks` is wired into `.pre-commit-config.yaml` (alongside
+`terraform_fmt`/`tflint`/`tfsec`) so secrets are caught before they're ever committed:
+
+![gitleaks — no leaks found across scanned commits](../images/gitleaks.png)
+
 ## How the CD pipeline deploys
 
 The `deploy-dev` job in `.github/workflows/cd.yml`:
@@ -34,6 +49,10 @@ The `deploy-dev` job in `.github/workflows/cd.yml`:
    docker build -t $IMG:$GITHUB_SHA ./app/src
    docker push $IMG:$GITHUB_SHA
    ```
+   The images accumulate in ECR (governed by the lifecycle policy — untagged expire after
+   7 days, last 30 kept):
+
+   ![ECR — pushed enterprise-devops-app images](../images/ecr.png)
 4. **Deploys with Helm.** It updates kubeconfig, then runs an idempotent
    `helm upgrade --install` using the dev values file, overriding the image, and
    **waits** for resources to become ready:
@@ -57,7 +76,13 @@ The `deploy-dev` job in `.github/workflows/cd.yml`:
 
 The `deploy-production` job is identical in shape but runs against the GitHub
 **`production` environment**, which is configured with a required reviewer. That means a
-push to `main` **pauses for manual approval** before it builds, pushes, and deploys.
+push to `main` **pauses for manual approval** before it builds, pushes, and deploys:
+
+![GitHub Actions — production deployment waiting for manual approval](../images/prod-approval.png)
+
+After approval, the production job runs to completion:
+
+![CD — deploy-production job succeeded](../images/prod-deployment.png)
 
 ## Prerequisites for a manual deploy
 
@@ -94,8 +119,33 @@ helm upgrade --install saas-app ./helm/saas-app -n default \
   --wait --timeout 5m
 ```
 
+A manual `helm upgrade` bumping the image to `v3` — Helm reports the release upgraded to
+revision 3:
+
+![Manual helm upgrade — build, push and deploy image v3](../images/rolling-update.png)
+
+Because the Deployment uses a rolling update, the ALB keeps serving throughout — the app
+responds with the new `v3` build and zero downtime:
+
+![App serving the v3 build through the ALB (zero-downtime rolling update)](../images/v3-rolling-update.png)
+
 The `scripts/bootstrap.sh` helper provisions the cluster and prints the exact deploy
 command for a fresh environment.
+
+## Provisioning the infrastructure
+
+Infrastructure is provisioned with Terraform (S3-backed remote state). `terraform plan`
+shows the full set of resources to be created:
+
+![terraform plan — resources and outputs](../images/terraform-plan.png)
+
+`terraform apply` reconciles the stack (here reporting no drift):
+
+![terraform apply — infrastructure matches configuration](../images/tf-apply.png)
+
+State is stored remotely in S3 (locked via DynamoDB), not on the local disk:
+
+![Remote Terraform state in the S3 backend bucket](../images/tf-state-remote.png)
 
 ## Verifying a deploy
 
@@ -107,6 +157,11 @@ helm history saas-app -n default
 
 The `ADDRESS` on the Ingress is the ALB DNS name; `curl http://<alb-dns>/health` should
 return healthy.
+
+Kubernetes self-heals: deleting a pod while under load, the Deployment immediately
+recreates it to maintain the desired replica count:
+
+![Self-healing — a deleted pod is automatically recreated](../images/auto-recovery.png)
 
 ## Rolling back
 
@@ -121,6 +176,11 @@ helm rollback saas-app -n default
 
 This is the same command the CD pipeline runs automatically when a rollout fails its
 smoke test.
+
+`kubectl rollout history` / `rollout undo` achieve the same at the Deployment level
+(note `--to-revision` is the correct flag, not `--to-version`):
+
+![kubectl rollout history and rollback to a previous revision](../images/rollout-history.png)
 
 ## Teardown
 

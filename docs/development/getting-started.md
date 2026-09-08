@@ -47,6 +47,8 @@ Jest config in `package.json`):
 npm test
 ```
 
+![npm test — unit suite passing with coverage summary](../images/test-cases.png)
+
 ## 4. Run integration tests
 
 Integration tests exercise the cache endpoints and **require a Redis instance** on
@@ -88,6 +90,10 @@ The server listens on `http://localhost:3000`. Useful endpoints:
 - `GET /metrics` — Prometheus metrics
 - `GET/POST/DELETE /api/v1/cache/:key` — Redis-backed cache API
 
+The root endpoint returns app metadata (environment, request ID, feature list, endpoints):
+
+![Application root response](../images/containerisation.png)
+
 ## 6. Build and run the Docker image
 
 The app ships a multi-stage `Dockerfile`. Build and run it with the provided npm scripts:
@@ -106,6 +112,10 @@ docker run -p 3000:3000 --env-file .env enterprise-devops-app
 
 The image runs as a non-root user (UID 1001) with `dumb-init` as PID 1 and a built-in
 `HEALTHCHECK` hitting `/health`.
+
+The multi-stage build (`deps` → `runtime`) in action:
+
+![Multi-stage Docker build completing](../images/multistage-build.png)
 
 ## Handy scripts
 
