@@ -66,6 +66,13 @@ resource "aws_iam_role_policy" "github_deploy" {
         Effect   = "Allow"
         Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
         Resource = "arn:aws:dynamodb:${var.aws_region}:*:table/terraform-state-lock"
+      },
+      {
+        # ReadOnlyAccess deliberately excludes secret *values* - terraform
+        # plan still needs to read this one to diff aws_secretsmanager_secret_version.
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+        Resource = aws_secretsmanager_secret.app_secrets.arn
       }
     ]
   })
