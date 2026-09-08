@@ -38,6 +38,9 @@ spec:
         app: redis
         component: cache
     spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -91,6 +94,8 @@ spec:
           runAsUser: 1001
           readOnlyRootFilesystem: false
           allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
       volumes:
       - name: redis-config
         configMap:
