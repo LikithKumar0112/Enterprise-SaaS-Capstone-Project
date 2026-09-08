@@ -206,7 +206,7 @@ app.get('/health', async (req, res) => {
 // Main endpoint
 app.get('/', (req, res) => {
   res.json({
-    message: 'Welcome to Enterprise DevOps Application - v3 rolling update demo',
+    message: 'Welcome to Enterprise DevOps Application - Pipeline dry-run',
     environment: process.env.NODE_ENV || 'development',
     requestId: req.id,
     features: [
@@ -514,5 +514,9 @@ if (require.main === module) {
     });
   });
 }
+
+// Exposed so tests can close pooled Redis connections in afterAll - without
+// this the sockets stay open and Jest hangs after the suite finishes.
+app.redisPool = redisPool;
 
 module.exports = app;
