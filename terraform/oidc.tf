@@ -63,8 +63,8 @@ resource "aws_iam_role_policy" "github_deploy" {
         # terraform init/plan reads state from S3 and locks it via DynamoDB.
         # ReadOnlyAccess (below) covers s3:GetObject, but not the DynamoDB
         # writes needed to acquire/release the state lock.
-        Effect = "Allow"
-        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
         Resource = "arn:aws:dynamodb:${var.aws_region}:*:table/terraform-state-lock"
       }
     ]
