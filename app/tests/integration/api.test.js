@@ -15,6 +15,12 @@ describe('API Integration Tests', () => {
 
   afterAll(async () => {
     await redisClient.quit();
+    // The routes under test open connections via server.js's own redis
+    // pool, separate from redisClient above - close those too or Jest
+    // hangs after the suite finishes ("did not exit one second after...").
+    await Promise.all(
+      Object.values(app.redisPool.clients).map((client) => client.quit())
+    );
   });
 
   describe('Cache endpoints', () => {
