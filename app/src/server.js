@@ -515,4 +515,8 @@ if (require.main === module) {
   });
 }
 
+// Exposed so tests can close pooled Redis connections in afterAll - without
+// this the sockets stay open and Jest hangs after the suite finishes.
+app.redisPool = redisPool;
+
 module.exports = app;
