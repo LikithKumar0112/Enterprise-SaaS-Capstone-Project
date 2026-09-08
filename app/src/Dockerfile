@@ -7,10 +7,17 @@ RUN npm ci --omit=dev
 # ---------- Stage 2: runtime ----------
 FROM node:20-alpine AS runtime
 WORKDIR /app
-RUN apk add --no-cache dumb-init && \
+# apk upgrade picks up patched OS packages (e.g. libcrypto3/openssl CVEs)
+# within this Alpine release. npm/npx/corepack are removed - the container
+# only ever runs `node server.js`, but npm ships its own bundled, frequently
+# outdated tar/brace-expansion that otherwise fail image vulnerability scans
+# for code this image never executes.
+RUN apk update && apk upgrade --no-cache && \
+    apk add --no-cache dumb-init && \
     addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001 && \
-    mkdir -p /app/logs && chown -R nodejs:nodejs /app
+    mkdir -p /app/logs && chown -R nodejs:nodejs /app && \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=deps --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --chown=nodejs:nodejs . .
 USER nodejs
