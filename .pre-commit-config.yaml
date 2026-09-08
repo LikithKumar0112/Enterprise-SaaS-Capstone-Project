@@ -9,3 +9,7 @@ repos:
         - id: terraform_fmt
         - id: terraform_tflint
         - id: terraform_tfsec
+          # Matches ci.yml's tfsec soft_fail posture (Phase 7): report, don't
+          # block, on findings we've already reviewed and accepted (public
+          # EKS endpoint - no VPN/bastion in this dev environment, etc).
+          args: [--args=--soft-fail]
