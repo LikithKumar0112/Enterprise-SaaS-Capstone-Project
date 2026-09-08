@@ -1,0 +1,30 @@
+name: Terraform
+on:
+  pull_request:
+    paths: ['terraform/**']
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: terraform fmt -check -recursive
+      - run: terraform init
+      - run: terraform validate
+      - name: tfsec
+        uses: aquasecurity/tfsec-action@v1.0.0
+      - run: terraform plan -no-color
