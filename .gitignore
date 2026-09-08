@@ -1,2 +1,29 @@
+# Dependencies
 node_modules/
 app/src/node_modules/
+
+# Manual / local-only E2E artifacts (removed from tracking in Phase 10)
+e2e-manual/
+
+# Test & coverage output
+coverage/
+
+# Logs
+*.log
+crash.log
+
+# Environment files (keep the example checked in)
+.env
+.env.*
+!.env.example
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/

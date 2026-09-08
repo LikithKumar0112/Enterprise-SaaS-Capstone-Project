@@ -78,7 +78,7 @@ All security scans must pass before deployment:
 ## Cost Optimization
 
 Monthly budget: $100
-Current spend tracking in [cost-optimization-report.md](./docs/cost-optimization/cost-optimization-report.md)
+Current spend tracking in [cost-optimization-report.md](./docs/cost-optimization-report.md)
 
 ## Contributing
 
