@@ -21,7 +21,13 @@ resource "aws_iam_role" "github_deploy" {
       Condition = {
         StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:LikithKumar0112/Enterprise-SaaS-Capstone-Project:*"
+          # GitHub now embeds immutable owner/repo IDs in the subject claim
+          # (repo:OWNER@ownerID/REPO@repoID:...) instead of the plain
+          # repo:OWNER/REPO:... format - match both so this survives either.
+          "token.actions.githubusercontent.com:sub" = [
+            "repo:LikithKumar0112/Enterprise-SaaS-Capstone-Project:*",
+            "repo:LikithKumar0112@*/Enterprise-SaaS-Capstone-Project@*:*",
+          ]
         }
       }
     }]
@@ -52,9 +58,25 @@ resource "aws_iam_role_policy" "github_deploy" {
         Effect   = "Allow"
         Action   = ["eks:DescribeCluster", "eks:ListClusters"]
         Resource = "*"
+      },
+      {
+        # terraform init/plan reads state from S3 and locks it via DynamoDB.
+        # ReadOnlyAccess (below) covers s3:GetObject, but not the DynamoDB
+        # writes needed to acquire/release the state lock.
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+        Resource = "arn:aws:dynamodb:${var.aws_region}:*:table/terraform-state-lock"
       }
     ]
   })
+}
+
+# terraform plan needs to read/refresh every resource type in this stack
+# (VPC, IAM, Secrets Manager, CloudWatch, SNS, Budgets, EKS...) - ReadOnlyAccess
+# covers that broadly without granting any ability to change real infra.
+resource "aws_iam_role_policy_attachment" "github_deploy_readonly" {
+  role       = aws_iam_role.github_deploy.name
+  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
 output "github_deploy_role_arn" {
