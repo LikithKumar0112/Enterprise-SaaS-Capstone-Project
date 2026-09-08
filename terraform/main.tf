@@ -113,6 +113,10 @@ module "eks" {
 resource "aws_ecr_repository" "app_repository" {
   name                 = "enterprise-devops-app-${var.environment}"
   image_tag_mutability = "IMMUTABLE"
+  # CD pushes one image per commit, so this repo is never empty by teardown
+  # time - without force_delete, terraform destroy fails with
+  # RepositoryNotEmptyException every single run (see docs/troubleshooting).
+  force_delete = true
 
   image_scanning_configuration {
     scan_on_push = true
