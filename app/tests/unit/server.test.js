@@ -2,8 +2,6 @@ const request = require('supertest');
 const app = require('../../src/server');
 const { createClient } = require('redis');
 
-// Mock Redis — return the same client instance on every createClient() call,
-// since the app pools and reuses a single client internally.
 jest.mock('redis', () => {
   const mockClient = {
     connect: jest.fn(),
@@ -102,12 +100,8 @@ describe('Enterprise DevOps Application - Unit Tests', () => {
     });
   });
 
-  // Runs last: intentionally trips the rate limiter, which then stays
-  // tripped for the rest of the process since the limiter's store is
-  // shared across requests to the same app instance.
   describe('Rate limiting', () => {
     it('should enforce rate limits', async () => {
-      // Make multiple requests quickly
       const requests = Array(101).fill().map(() =>
         request(app).get('/')
       );
