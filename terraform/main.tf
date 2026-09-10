@@ -23,7 +23,6 @@ terraform {
     }
   }
 
-  # Using the existing state bucket + lock table created in Phase 4.
   backend "s3" {
     bucket         = "capstone-tf-bucket"
     key            = "development/terraform.tfstate"
@@ -46,15 +45,12 @@ provider "aws" {
   }
 }
 
-# Generate random password for Redis
 resource "random_password" "redis_auth" {
   length           = 16
   special          = true
   override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
-# App secrets (Redis auth token, etc.) - the app service account reads
-# this at runtime instead of having credentials baked into the image.
 resource "aws_secretsmanager_secret" "app_secrets" {
   name        = "enterprise-devops-app-secrets-${var.environment}"
   description = "Runtime secrets for the enterprise-devops-app"
@@ -67,7 +63,6 @@ resource "aws_secretsmanager_secret_version" "app_secrets" {
   })
 }
 
-# VPC Module
 module "vpc" {
   source = "./modules/vpc"
 
@@ -75,10 +70,9 @@ module "vpc" {
   availability_zones = ["us-east-1a", "us-east-1b"]
   environment        = var.environment
   enable_nat_gateway = true
-  single_nat_gateway = true # ONE NAT for all AZs — saves ~$64/mo
+  single_nat_gateway = true
 }
 
-# EKS Module
 module "eks" {
   source = "./modules/eks"
 
@@ -89,13 +83,8 @@ module "eks" {
 
   node_groups = var.node_groups
 
-  # IRSA for service accounts
   enable_irsa = true
 
-  # Addon configurations
-  # NOTE: aws-ebs-csi-driver is intentionally left out - nothing in this
-  # app uses PersistentVolumeClaims, and the addon needs its own IAM role
-  # (IRSA) to work properly, which adds complexity for no benefit here.
   cluster_addons = {
     coredns = {
       most_recent = true
@@ -109,13 +98,9 @@ module "eks" {
   }
 }
 
-# ECR Repository with lifecycle policies
 resource "aws_ecr_repository" "app_repository" {
   name                 = "enterprise-devops-app-${var.environment}"
   image_tag_mutability = "IMMUTABLE"
-  # CD pushes one image per commit, so this repo is never empty by teardown
-  # time - without force_delete, terraform destroy fails with
-  # RepositoryNotEmptyException every single run (see docs/troubleshooting).
   force_delete = true
 
   image_scanning_configuration {
@@ -141,8 +126,6 @@ resource "aws_ecr_lifecycle_policy" "app_lifecycle" {
       }
       },
       {
-        # tagStatus "any" must be the highest rulePriority (evaluated last) -
-        # AWS rejects a policy where it isn't.
         rulePriority = 2
         description  = "Keep last 30 images"
         selection = {
@@ -157,9 +140,6 @@ resource "aws_ecr_lifecycle_policy" "app_lifecycle" {
   })
 }
 
-# Elasticache Redis (disabled by default - see k8s/redis-deployment.yaml
-# for the in-cluster Redis this app uses instead; set enable_redis = true
-# only if you want to move Redis to a managed AWS service)
 resource "aws_elasticache_cluster" "redis" {
   count = var.enable_redis ? 1 : 0
 
@@ -212,7 +192,6 @@ resource "aws_security_group" "redis" {
   }
 }
 
-# IAM Roles for Service Accounts with fine-grained permissions
 resource "aws_iam_role" "app_service_account" {
   name = "eks-app-service-account-${var.environment}"
 
@@ -286,16 +265,11 @@ resource "aws_iam_role_policy_attachment" "app_permissions" {
   policy_arn = aws_iam_policy.app_permissions.arn
 }
 
-# NOTE: no separate EKS cluster log group here - the EKS module already
-# creates and manages "/aws/eks/<cluster-name>/cluster" itself when cluster
-# logging is enabled, so a second resource with the same name would collide.
-
 resource "aws_cloudwatch_log_group" "app_logs" {
   name              = "/aws/ecs/enterprise-devops-app-${var.environment}"
   retention_in_days = 90
 }
 
-# Enhanced CloudWatch Alarms
 resource "aws_cloudwatch_metric_alarm" "high_cpu" {
   alarm_name          = "eks-high-cpu-${var.environment}"
   comparison_operator = "GreaterThanThreshold"
@@ -322,7 +296,7 @@ resource "aws_cloudwatch_metric_alarm" "low_memory" {
   namespace           = "ContainerInsights"
   period              = "300"
   statistic           = "Average"
-  threshold           = "1073741824" # 1GB
+  threshold           = "1073741824"
   alarm_description   = "This metric monitors available memory"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
@@ -332,7 +306,6 @@ resource "aws_cloudwatch_metric_alarm" "low_memory" {
   }
 }
 
-# SNS Topic for alerts
 resource "aws_sns_topic" "alerts" {
   name = "devops-alerts-${var.environment}"
 }
@@ -343,7 +316,6 @@ resource "aws_sns_topic_subscription" "email_subscription" {
   endpoint  = var.alert_email
 }
 
-# AWS Budget for cost optimization
 resource "aws_budgets_budget" "monthly" {
   name              = "monthly-devops-budget-${var.environment}"
   budget_type       = "COST"
