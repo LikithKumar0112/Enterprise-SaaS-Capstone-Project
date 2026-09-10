@@ -32,6 +32,6 @@ describe('Load and Performance Tests', () => {
     
     console.log(`Average response time: ${avgTime.toFixed(2)}ms`);
     
-    expect(avgTime).toBeLessThan(100); // Should be under 100ms average
+    expect(avgTime).toBeLessThan(100);
   });
 });
