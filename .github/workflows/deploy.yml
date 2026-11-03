@@ -1,0 +1,90 @@
+name: Deploy
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      cluster-name:
+        type: string
+        required: true
+      values-file:
+        type: string
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # AWS_DEPLOY_ROLE_ARN resolves per environment. Each role can only be assumed from its
+    # own GitHub environment and can only push to its own ECR repository.
+    environment: ${{ inputs.environment }}
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      CLUSTER: ${{ inputs.cluster-name }}
+      VALUES_FILE: ${{ inputs.values-file }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: enterprise-devops-app-${{ inputs.environment }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check configuration
+        run: |
+          test -n "$CLUSTER" || { echo "::error::Cluster variable is empty for $ENVIRONMENT"; exit 1; }
+          case "$CLUSTER" in *"$ENVIRONMENT"*) ;; *)
+            echo "::error::Cluster '$CLUSTER' does not match environment '$ENVIRONMENT'"; exit 1 ;;
+          esac
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@aded0d722166a37980e030aa969dda0bfe6b6947 # v2.1.7
+
+      - name: Build & push image
+        env:
+          IMG: ${{ steps.ecr.outputs.registry }}/enterprise-devops-app-${{ inputs.environment }}
+        run: |
+          # Tags are immutable, so a re-run of this commit reuses the image it already pushed.
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "Image $IMAGE_TAG already exists"
+          else
+            docker build -t "$IMG:$IMAGE_TAG" ./app/src
+            docker push "$IMG:$IMAGE_TAG"
+          fi
+
+      - name: Deploy with Helm (rolls back automatically if the rollout fails)
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          REDIS_HOST=$(aws elasticache describe-replication-groups \
+            --replication-group-id "devops-redis-$ENVIRONMENT" \
+            --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Address' --output text)
+          helm upgrade --install saas-app ./helm/saas-app -n default \
+            -f "./helm/saas-app/$VALUES_FILE" \
+            --set "image.repository=$REGISTRY/$ECR_REPOSITORY" \
+            --set "image.tag=$IMAGE_TAG" \
+            --set "serviceAccount.roleArn=arn:aws:iam::$ACCOUNT:role/eks-app-service-account-$ENVIRONMENT" \
+            --set "env.REDIS_URL=rediss://$REDIS_HOST:6379" \
+            --set "env.AWS_REGION=$AWS_REGION" \
+            --atomic --timeout 5m
+
+      - name: Smoke test, roll back on failure
+        run: |
+          kubectl port-forward -n default svc/enterprise-devops-app-service 8080:80 > /dev/null &
+          smoke() {
+            curl -fsS --retry 10 --retry-connrefused --retry-delay 2 http://localhost:8080/readyz &&
+            curl -fsS http://localhost:8080/health &&
+            curl -fsS http://localhost:8080/api/v1/products | grep -q '"success":true'
+          }
+          if ! smoke; then
+            echo "::error::Smoke test failed, rolling back"
+            helm rollback saas-app -n default --wait --timeout 5m
+            exit 1
+          fi

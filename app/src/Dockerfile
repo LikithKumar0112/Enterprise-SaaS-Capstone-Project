@@ -1,28 +1,28 @@
 # ---------- Stage 1: production dependencies ----------
-FROM node:20-alpine AS deps
+# Base image pinned by digest for reproducible builds; Dependabot proposes updates.
+FROM node:22.23.4-alpine3.24@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
 # ---------- Stage 2: runtime ----------
-FROM node:20-alpine AS runtime
+FROM node:22.23.4-alpine3.24@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS runtime
 WORKDIR /app
-# apk upgrade picks up patched OS packages (e.g. libcrypto3/openssl CVEs)
-# within this Alpine release. npm/npx/corepack are removed - the container
+# OS patches come from updating the pinned base image, not `apk upgrade`, so the
+# same Dockerfile always builds the same packages. npm/npx/corepack are removed - the container
 # only ever runs `node server.js`, but npm ships its own bundled, frequently
 # outdated tar/brace-expansion that otherwise fail image vulnerability scans
 # for code this image never executes.
-RUN apk update && apk upgrade --no-cache && \
-    apk add --no-cache dumb-init=1.2.5-r3 && \
+RUN apk add --no-cache dumb-init=1.2.5-r4 && \
     addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001 && \
-    mkdir -p /app/logs && chown -R nodejs:nodejs /app && \
+    chown -R nodejs:nodejs /app && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=deps --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --chown=nodejs:nodejs . .
 USER 1001:1001
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["node", "-e", "require('http').get('http://localhost:3000/health',r=>process.exit([200,503].includes(r.statusCode)?0:1)).on('error',()=>process.exit(1))"]
+  CMD ["node", "-e", "require('http').get('http://localhost:3000/livez',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "server.js"]

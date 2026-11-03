@@ -1,0 +1,15 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /app/src
+    schedule:
+      interval: weekly
+  # Keeps the pinned base image digest, which is the source of OS patches, up to date.
+  - package-ecosystem: docker
+    directory: /app/src
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

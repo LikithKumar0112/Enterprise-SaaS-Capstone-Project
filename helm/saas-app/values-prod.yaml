@@ -1,4 +1,14 @@
-replicaCount: 3
 autoscaling:
   minReplicas: 3
   maxReplicas: 6
+
+pdb:
+  minAvailable: 2
+
+networkPolicy:
+  albSourceCidrs: ["10.1.128.0/20", "10.1.144.0/20"]
+  redisCidrs: ["10.1.0.0/20", "10.1.16.0/20"]
+
+env:
+  NODE_ENV: production
+  AWS_SECRET_NAME: enterprise-devops-app-secrets-production

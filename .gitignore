@@ -7,9 +7,11 @@ e2e-manual/
 
 # Test & coverage output
 coverage/
+junit.xml
 
 # Logs
 *.log
+logs/
 crash.log
 
 # Environment files (keep the example checked in)
@@ -21,7 +23,9 @@ crash.log
 .terraform/
 *.tfstate
 *.tfstate.*
-tfplan
+# Plan files embed a full copy of state, including secrets
+tfplan*
+*.tfplan
 
 # OS / editor cruft
 .DS_Store

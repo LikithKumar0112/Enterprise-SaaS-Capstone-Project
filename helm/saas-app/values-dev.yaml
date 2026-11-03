@@ -1,9 +1,19 @@
-replicaCount: 1
 autoscaling:
   minReplicas: 1
   maxReplicas: 2
+
+# A single replica with minAvailable: 1 would block every node drain.
+pdb:
+  enabled: false
+
 resources:
   requests: { cpu: 50m, memory: 96Mi }
   limits:   { cpu: 300m, memory: 256Mi }
+
+networkPolicy:
+  albSourceCidrs: ["10.0.128.0/20", "10.0.144.0/20"]
+  redisCidrs: ["10.0.0.0/20", "10.0.16.0/20"]
+
 env:
   NODE_ENV: development
+  AWS_SECRET_NAME: enterprise-devops-app-secrets-development

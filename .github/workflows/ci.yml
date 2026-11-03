@@ -2,8 +2,8 @@ name: CI
 on:
   pull_request:
     branches: [main, develop]
-  push:
-    branches: [develop]
+  # cd.yml calls this workflow, so nothing deploys unless all of it passes.
+  workflow_call:
 
 jobs:
   test:
@@ -16,10 +16,10 @@ jobs:
       run:
         working-directory: app/src
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: app/src/package-lock.json
       - run: npm ci
@@ -28,14 +28,26 @@ jobs:
       - run: npm run test:integration
         env:
           REDIS_URL: redis://localhost:6379
+      - name: Load test (fails on p95, p99 or error-rate thresholds)
+        env:
+          NODE_ENV: development
+          REDIS_URL: redis://localhost:6379
+          RATE_LIMIT_MAX: '100000000'
+        run: |
+          node server.js > /dev/null &
+          curl --retry 10 --retry-connrefused --retry-delay 1 -fsS http://localhost:3000/readyz
+          docker run --rm --network host -v "$PWD/../tests/load:/scripts:ro" grafana/k6:2.3.0 \
+            run -e VUS=10 -e DURATION=1m /scripts/k6-load.js
 
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Blocking gate. Dependabot PRs have no access to this secret, so they skip it;
+      # Snyk still scans the result when the PR is merged and CD calls this workflow.
       - name: Snyk dependency scan
-        uses: snyk/actions/node@master
-        continue-on-error: true
+        if: github.actor != 'dependabot[bot]'
+        uses: snyk/actions/node@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -45,10 +57,10 @@ jobs:
     needs: [test, security]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Build image (no push)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: ./app/src
           push: false
@@ -57,13 +69,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: 'app:${{ github.sha }}'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
           ignore-unfixed: true
       - name: Hadolint Dockerfile lint
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: app/src/Dockerfile

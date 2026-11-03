@@ -9,7 +9,7 @@ cd app/src
 
 ## Prerequisites
 
-- **Node.js 20+** and **npm 9+** (the app declares `engines: node >=18`, and CI runs on Node 20)
+- **Node.js 22+** and **npm 9+** (CI and the Docker image use Node 22)
 - **Docker** (for running Redis locally and building the image)
 
 ## 1. Install dependencies
@@ -36,6 +36,10 @@ REDIS_URL=redis://localhost:6379
 EXTERNAL_API_URL=https://api.mocki.io/v2/5143e9e3
 APP_VERSION=2.0.0
 ALLOWED_ORIGINS=http://localhost:3000
+REDIS_PASSWORD=
+AWS_SECRET_NAME=
+TRUST_PROXY_HOPS=0
+RATE_LIMIT_MAX=100
 ```
 
 ## 3. Run unit tests
@@ -51,8 +55,8 @@ npm test
 
 ## 4. Run integration tests
 
-Integration tests exercise the cache endpoints and **require a Redis instance** on
-`localhost:6379`. Start one with Docker:
+Integration tests exercise the cache endpoints, a Redis outage and recovery, and
+circuit-breaker recovery. They **require a Redis instance** on `localhost:6379`. Start one with Docker:
 
 ```bash
 docker run -d --name dev-redis -p 6379:6379 redis:7-alpine
@@ -79,14 +83,16 @@ docker rm -f dev-redis
 With Redis running (step 4) and a `.env` in place:
 
 ```bash
-npm start        # node src/server.js
+npm start        # node server.js
 # or, with auto-reload:
 npm run dev
 ```
 
 The server listens on `http://localhost:3000`. Useful endpoints:
 
-- `GET /health` — health check (used by container/K8s probes and the ALB)
+- `GET /livez` — liveness probe; no dependency checks
+- `GET /readyz` — readiness probe and ALB health check; fails only while shutting down
+- `GET /health` — detailed dependency status for humans and dashboards
 - `GET /metrics` — Prometheus metrics
 - `GET/POST/DELETE /api/v1/cache/:key` — Redis-backed cache API
 
@@ -111,11 +117,22 @@ docker run -p 3000:3000 --env-file .env enterprise-devops-app
 ```
 
 The image runs as a non-root user (UID 1001) with `dumb-init` as PID 1 and a built-in
-`HEALTHCHECK` hitting `/health`.
+`HEALTHCHECK` hitting `/livez`.
 
 The multi-stage build (`deps` → `runtime`) in action:
 
 ![Multi-stage Docker build completing](../images/multistage-build.png)
+
+## 7. Run the load test
+
+With the app running and `RATE_LIMIT_MAX` set high (all k6 traffic comes from one IP):
+
+```bash
+RATE_LIMIT_MAX=100000000 npm start
+k6 run -e VUS=10 -e DURATION=1m ../tests/load/k6-load.js
+```
+
+k6 reports throughput, p95/p99 latency and error rate, and fails if a threshold is missed.
 
 ## Handy scripts
 
@@ -123,7 +140,7 @@ The multi-stage build (`deps` → `runtime`) in action:
 |-----------------------------|-----------------------------------------------|
 | `npm test`                  | Unit tests with coverage                      |
 | `npm run test:integration`  | Integration tests (needs Redis)               |
-| `npm run test:e2e`          | End-to-end / load tests                       |
+| `npm run test:load`         | k6 load test (needs k6 and a running app)     |
 | `npm run lint`              | ESLint                                        |
 | `npm run lint:fix`          | ESLint with autofix                           |
 | `npm run security-check`    | `npm audit --audit-level=critical`            |

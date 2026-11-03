@@ -5,9 +5,13 @@ variable "aws_region" {
 }
 
 variable "environment" {
-  description = "Environment name"
+  description = "Environment name: development or production"
   type        = string
-  default     = "production"
+
+  validation {
+    condition     = contains(["development", "production"], var.environment)
+    error_message = "environment must be development or production."
+  }
 }
 
 variable "cluster_name" {
@@ -49,9 +53,15 @@ variable "node_groups" {
 }
 
 variable "enable_redis" {
-  description = "Use AWS ElastiCache (true) or in-cluster Redis (false)"
+  description = "Create the ElastiCache replication group used by the app"
   type        = bool
   default     = false
+}
+
+variable "redis_num_cache_nodes" {
+  description = "1 = single node, 2+ = primary with replicas, Multi-AZ and automatic failover"
+  type        = number
+  default     = 1
 }
 
 variable "redis_node_type" {

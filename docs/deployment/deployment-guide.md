@@ -5,17 +5,19 @@ CI/CD path and how to deploy or roll back manually.
 
 ## CI/CD overview
 
-Two workflows drive delivery (see `.github/workflows/`):
+Workflows in `.github/workflows/`:
 
-- **`ci.yml`** runs on PRs to `main`/`develop` and on pushes to `develop`. It lints,
-  runs unit + integration tests (against a `redis:7-alpine` service container), runs a
-  Snyk dependency scan, builds the image, and scans it with Trivy (fails on CRITICAL/HIGH)
-  and Hadolint. Nothing is deployed from CI.
-- **`cd.yml`** runs on pushes to `develop` (→ development) and `main` (→ production).
+- **`ci.yml`** runs on PRs to `main`/`develop`, and is called by `cd.yml`. It lints, runs unit
+  and integration tests against a `redis:7-alpine` service container, runs a k6 load test with
+  latency and error thresholds, runs a blocking Snyk scan, builds the image, and scans it with
+  Trivy (fails on CRITICAL/HIGH) and Hadolint.
+- **`cd.yml`** runs on pushes to `develop` and `main`. It runs all of CI first, so a failed test
+  or scan stops the deployment.
+- **`deploy.yml`** is the deployment job, shared by both environments so they can't drift apart.
 
 ```
-push to develop ──► CD: deploy-dev ──────────────► development environment (auto)
-push to main ─────► CD: deploy-production ──►[approval]──► production environment
+push to develop ──► CI ──► deploy (development cluster, development ECR)
+push to main ─────► CI ──►[approval]──► deploy (production cluster, production ECR)
 ```
 
 The CI workflow (`test` → `build`, with `security` in parallel) passing on a PR:
@@ -35,54 +37,42 @@ Beyond the pipeline, `gitleaks` is wired into `.pre-commit-config.yaml` (alongsi
 
 ## How the CD pipeline deploys
 
-The `deploy-dev` job in `.github/workflows/cd.yml`:
+Each environment's deployment (`deploy.yml`):
 
-1. **Assumes an AWS role via OIDC.** `aws-actions/configure-aws-credentials` exchanges
-   the GitHub OIDC token for temporary AWS credentials by assuming
-   `secrets.AWS_DEPLOY_ROLE_ARN`. No static AWS keys are stored in GitHub.
-2. **Logs in to ECR** with `aws-actions/amazon-ecr-login`.
-3. **Builds and pushes the image** to
-   `.../enterprise-devops-app-development`, tagged with the commit SHA
-   (`github.sha`):
-   ```bash
-   IMG=$REGISTRY/enterprise-devops-app-development
-   docker build -t $IMG:$GITHUB_SHA ./app/src
-   docker push $IMG:$GITHUB_SHA
-   ```
-   The images accumulate in ECR (governed by the lifecycle policy — untagged expire after
-   7 days, last 30 kept):
+1. **Checks the configuration.** The job stops if the cluster variable is empty, or names a
+   different environment.
+2. **Assumes that environment's AWS role via OIDC.** No static AWS keys are stored in GitHub. The
+   production role can only be assumed from the GitHub `production` environment, and can only push to
+   the production ECR repository.
+3. **Logs in to ECR, builds and pushes the image**, tagged with the commit SHA. If a re-run finds
+   that tag already exists, it reuses the image, because tags are immutable. Images are governed by
+   the lifecycle policy (untagged expire after 7 days, last 30 kept).
 
    ![ECR — pushed enterprise-devops-app images](../images/ecr.png)
-4. **Deploys with Helm.** It updates kubeconfig, then runs an idempotent
-   `helm upgrade --install` using the dev values file, overriding the image, and
-   **waits** for resources to become ready:
-   ```bash
-   aws eks update-kubeconfig --name $EKS_CLUSTER_NAME_DEV --region $AWS_REGION
-   helm upgrade --install saas-app ./helm/saas-app -n default \
-     -f ./helm/saas-app/values-dev.yaml \
-     --set image.repository=$REGISTRY/enterprise-devops-app-development \
-     --set image.tag=$GITHUB_SHA --wait --timeout 5m
-   ```
-5. **Smoke test + auto-rollback.** It checks the rollout status and, if the new
-   ReplicaSet doesn't become healthy in time, **rolls back to the previous release**:
-   ```bash
-   kubectl rollout status deployment/enterprise-devops-app -n default --timeout=180s \
-     || { echo "Rollout failed — rolling back"; helm rollback saas-app -n default; exit 1; }
-   ```
-
-![CD pipeline — deploy-dev job: OIDC, ECR login, build/push, Helm deploy, smoke test + auto-rollback](../images/cd-deploy-dev.png)
+4. **Deploys with `helm upgrade --install --atomic`**, using that environment's values file. If the
+   rollout doesn't become healthy within 5 minutes, Helm rolls back automatically.
+5. **Runs a smoke test** through a port-forward: `/readyz`, `/health` (which needs a working Redis
+   connection, so it also proves the secret and network path) and the products API. If it fails, the
+   job runs `helm rollback` and fails.
 
 ### Production
 
-The `deploy-production` job is identical in shape but runs against the GitHub
-**`production` environment**, which is configured with a required reviewer. That means a
-push to `main` **pauses for manual approval** before it builds, pushes, and deploys:
+A push to `main` runs CI, then **pauses for manual approval** through the GitHub `production`
+environment's required reviewer:
 
 ![GitHub Actions — production deployment waiting for manual approval](../images/prod-approval.png)
 
-After approval, the production job runs to completion:
+### GitHub configuration
 
-![CD — deploy-production job succeeded](../images/prod-deployment.png)
+| Name | Kind | Scope | Value |
+|---|---|---|---|
+| `AWS_DEPLOY_ROLE_ARN` | Secret | Repository | `github_deploy_role_arn` output from development |
+| `AWS_DEPLOY_ROLE_ARN` | Secret | `production` environment | `github_deploy_role_arn` output from production |
+| `SNYK_TOKEN` | Secret | Repository | Snyk API token; CI fails without it |
+| `AWS_REGION` | Variable | Repository | `us-east-1` |
+| `EKS_CLUSTER_NAME_DEV` | Variable | Repository | `devops-app-development` |
+| `EKS_CLUSTER_NAME_PROD` | Variable | Repository | `devops-app-production` |
+| `ALERT_EMAIL` | Variable | Repository | Address for alarm and budget emails |
 
 ## Prerequisites for a manual deploy
 
@@ -96,27 +86,18 @@ After approval, the production job runs to completion:
 
 ## Manual deploy
 
-Deploy a specific image tag (a commit SHA that exists in ECR):
+Deploy a specific image tag (a commit SHA that exists in ECR). Run this from `terraform/`, initialized
+for the same environment. For production, use `values-prod.yaml`:
 
 ```bash
-# Get the ECR repository URL from Terraform outputs
-ECR_URL=$(cd terraform && terraform output -raw ecr_repository_url)
-
-helm upgrade --install saas-app ./helm/saas-app -n default \
-  -f ./helm/saas-app/values-dev.yaml \
-  --set image.repository=$ECR_URL \
+helm upgrade --install saas-app ../helm/saas-app -n default \
+  -f ../helm/saas-app/values-dev.yaml \
+  --set image.repository=$(terraform output -raw ecr_repository_url) \
   --set image.tag=<commit-sha> \
-  --wait --timeout 5m
-```
-
-For production, use the prod values file instead:
-
-```bash
-helm upgrade --install saas-app ./helm/saas-app -n default \
-  -f ./helm/saas-app/values-prod.yaml \
-  --set image.repository=$ECR_URL \
-  --set image.tag=<commit-sha> \
-  --wait --timeout 5m
+  --set serviceAccount.roleArn=$(terraform output -raw app_role_arn) \
+  --set env.REDIS_URL=rediss://$(terraform output -raw redis_endpoint):6379 \
+  --set env.AWS_REGION=us-east-1 \
+  --atomic --timeout 5m
 ```
 
 A manual `helm upgrade` bumping the image to `v3` — Helm reports the release upgraded to
@@ -129,10 +110,17 @@ responds with the new `v3` build and zero downtime:
 
 ![App serving the v3 build through the ALB (zero-downtime rolling update)](../images/v3-rolling-update.png)
 
-The `scripts/bootstrap.sh` helper provisions the cluster and prints the exact deploy
-command for a fresh environment.
-
 ## Provisioning the infrastructure
+
+Once per AWS account, apply [`terraform/bootstrap`](../../terraform/bootstrap/README.md). It creates
+the S3 state bucket, the DynamoDB lock table and the GitHub OIDC provider. Then provision each
+environment, which also installs the AWS Load Balancer Controller:
+
+```bash
+export TF_VAR_alert_email=you@example.com
+./scripts/bootstrap.sh development
+./scripts/bootstrap.sh production
+```
 
 Infrastructure is provisioned with Terraform (S3-backed remote state). `terraform plan`
 shows the full set of resources to be created:
@@ -158,10 +146,7 @@ helm history saas-app -n default
 The `ADDRESS` on the Ingress is the ALB DNS name; `curl http://<alb-dns>/health` should
 return healthy.
 
-Kubernetes self-heals: deleting a pod while under load, the Deployment immediately
-recreates it to maintain the desired replica count:
-
-![Self-healing — a deleted pod is automatically recreated](../images/auto-recovery.png)
+See [Chaos Experiments](../chaos-engineering.md) for failure testing.
 
 ## Rolling back
 
@@ -174,8 +159,8 @@ helm rollback saas-app <revision> -n default
 helm rollback saas-app -n default
 ```
 
-This is the same command the CD pipeline runs automatically when a rollout fails its
-smoke test.
+The CD pipeline runs this automatically if the smoke test fails. If the rollout itself fails,
+`--atomic` rolls back without it.
 
 `kubectl rollout history` / `rollout undo` achieve the same at the Deployment level
 (note `--to-revision` is the correct flag, not `--to-version`):
@@ -184,12 +169,12 @@ smoke test.
 
 ## Teardown
 
-To destroy the billable infrastructure, use the teardown script — it deletes the
-Ingress first so the AWS Load Balancer Controller removes the ALB before Terraform tries
+To destroy an environment's billable infrastructure, use the teardown script. It removes
+the app first, so the AWS Load Balancer Controller deletes the ALB before Terraform tries
 to delete the VPC:
 
 ```bash
-./scripts/teardown.sh
+TF_VAR_alert_email=you@example.com ./scripts/teardown.sh production
 ```
 
 ## Related documents

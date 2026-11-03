@@ -26,9 +26,9 @@ This project implements a complete DevOps lifecycle for a Node.js application de
 ### Initial Setup
 1. Clone repository: `git clone <repo-url>`
 2. Configure AWS: `aws configure`
-3. Initialize Terraform: `cd terraform && terraform init`
-4. Deploy infrastructure: `terraform apply`
-5. Configure kubectl: `aws eks update-kubeconfig --name <cluster-name>`
+3. Create the state backend and OIDC provider, once per account: see [terraform/bootstrap](./terraform/bootstrap/README.md)
+4. Provision an environment: `TF_VAR_alert_email=you@example.com ./scripts/bootstrap.sh development`
+5. Deploy through CI/CD, or manually: see the [Deployment Guide](./docs/deployment/deployment-guide.md)
 
 ## Repository Structure
 
@@ -40,6 +40,9 @@ See [STRUCTURE.md](./STRUCTURE.md) for detailed repository organization.
 - [Architecture](./docs/architecture/system-design.md)
 - [Deployment Guide](./docs/deployment/deployment-guide.md)
 - [Troubleshooting](./docs/troubleshooting/common-issues.md)
+- [Chaos Experiments](./docs/chaos-engineering.md)
+- [Production Checklist](./docs/production-checklist.md)
+- [Review Follow-up](./docs/REVIEW-FOLLOWUP.md): what is implemented, tested, and not yet run
 
 ## Branching Strategy
 
@@ -58,8 +61,8 @@ npm test
 # Integration tests
 npm run test:integration
 
-# E2E tests
-npm run test:e2e
+# Load test: p95, p99, throughput, error rate (needs k6)
+npm run test:load
 ```
 
 ## Monitoring
@@ -70,10 +73,12 @@ npm run test:e2e
 
 ## Security
 
-All security scans must pass before deployment:
+All of these must pass before anything deploys:
 - Trivy (container scanning)
 - Snyk (dependency scanning)
-- OWASP (security testing)
+- Hadolint (Dockerfile linting)
+
+Gitleaks runs as a pre-commit hook, and a Trivy filesystem scan runs nightly.
 
 ## Cost Optimization
 

@@ -6,24 +6,28 @@ This document describes the actual layout of the repository and what lives where
 .
 ├── app/                         # Node.js application
 │   ├── src/                     # Application source
-│   │   ├── server.js            # Express app (health, metrics, cache API, circuit breaker)
+│   │   ├── server.js            # Express app (probes, metrics, cache API, circuit breaker)
+│   │   ├── secrets.js           # Loads the Redis token from Secrets Manager at startup
 │   │   ├── package.json         # App manifest + npm scripts + Jest config
 │   │   ├── package-lock.json    # Locked dependency tree (used by `npm ci`)
-│   │   ├── Dockerfile           # Multi-stage build (deps → runtime, non-root, distroless-style)
+│   │   ├── Dockerfile           # Multi-stage build (deps → runtime, non-root, digest-pinned base)
 │   │   ├── .dockerignore
 │   │   ├── .eslintrc.json
 │   │   └── .env.example         # Template for local environment variables
 │   └── tests/
-│       ├── unit/server.test.js          # `npm test` (Jest, with coverage)
-│       ├── integration/api.test.js      # `npm run test:integration` (needs Redis)
-│       ├── e2e/load.test.js             # `npm run test:e2e`
+│       ├── unit/                        # `npm test` (Jest, with coverage, needs nothing else)
+│       ├── integration/                 # `npm run test:integration` (needs Redis), includes outage recovery
+│       ├── load/k6-load.js              # `npm run test:load` (needs k6)
 │       └── setup.js                     # Global Jest setup
 │
 ├── terraform/                   # Infrastructure as Code (AWS)
-│   ├── main.tf                  # Root module: wires VPC + EKS + ECR + Secrets/IAM/SNS/Budget
+│   ├── bootstrap/               # Run once: state bucket, lock table, GitHub OIDC provider
+│   ├── backend/                 # Backend settings per environment (development, production)
+│   ├── environments/            # Variable values per environment (development, production)
+│   ├── main.tf                  # Root module: VPC + EKS + ECR + ElastiCache + Secrets/IAM/SNS/Budget
 │   ├── variables.tf             # Input variables (region, node_groups, enable_redis, ...)
-│   ├── terraform.tfvars         # Concrete values for the development environment
-│   ├── oidc.tf                  # GitHub Actions OIDC provider + deploy role
+│   ├── observability.tf         # CloudWatch add-on (metrics, log shipping), alarms
+│   ├── oidc.tf                  # GitHub Actions deploy role, scoped to one environment
 │   ├── github-actions-eks-access.tf   # EKS access entry/RBAC for the deploy role
 │   ├── lb-controller-irsa.tf    # IRSA role for the AWS Load Balancer Controller
 │   └── modules/
@@ -36,26 +40,22 @@ This document describes the actual layout of the repository and what lives where
 │       ├── values.yaml         # Base values
 │       ├── values-dev.yaml     # Development overrides (used by the CD pipeline)
 │       ├── values-prod.yaml    # Production overrides
-│       └── templates/          # Deployment, Service, Ingress (ALB), HPA, PDB
-│
-├── k8s/                         # Raw manifests applied outside the chart
-│   ├── redis-deployment.yaml   # In-cluster Redis (ConfigMap + Deployment + Service)
-│   ├── network-policy.yaml     # NetworkPolicy for the app pods
-│   ├── cpu-stress.yaml         # Load generator used to demonstrate HPA scaling
-│   ├── hpa.yaml
-│   └── pod-disruption-budget.yaml
+│       └── templates/          # Deployment, Service, ServiceAccount, Ingress, HPA, PDB, NetworkPolicy
 │
 ├── monitoring/
 │   └── servicemonitor.yaml     # ServiceMonitor scraped by kube-prometheus-stack
 │
 ├── scripts/
-│   ├── bootstrap.sh            # terraform init/apply + update-kubeconfig
-│   └── teardown.sh             # Deletes ALB-owning Ingress, then terraform destroy
+│   ├── bootstrap.sh            # Provision one environment and install the LB controller
+│   ├── teardown.sh             # Remove the app and its ALB, then terraform destroy
+│   └── chaos-test.sh           # Controlled failure experiments with measured recovery
 │
 ├── .github/
+│   ├── dependabot.yml          # npm, base image and action updates
 │   └── workflows/
-│       ├── ci.yml              # Lint, unit + integration tests, Snyk, image build, Trivy, Hadolint
-│       ├── cd.yml              # Build/push to ECR + Helm deploy (dev auto, prod gated)
+│       ├── ci.yml              # Lint, tests, k6 load test, Snyk, image build, Trivy, Hadolint
+│       ├── cd.yml              # CI, then deploy (develop to dev, main to production with approval)
+│       ├── deploy.yml          # Reusable deploy: build/push, Helm --atomic, smoke test
 │       ├── terraform.yml       # fmt/init/validate/tfsec/plan on terraform/** PRs
 │       └── security.yml        # Nightly Trivy filesystem scan → GitHub Security tab
 │
@@ -67,6 +67,7 @@ This document describes the actual layout of the repository and what lives where
 │   ├── branching-strategy.md
 │   ├── chaos-engineering.md
 │   ├── production-checklist.md
+│   ├── REVIEW-FOLLOWUP.md
 │   ├── cost-optimization-report.md
 │   └── images/                  # Screenshots referenced by the docs
 │
@@ -81,10 +82,9 @@ This document describes the actual layout of the repository and what lives where
 
 | Area           | Directory        | Technology                                   |
 |----------------|------------------|----------------------------------------------|
-| Application    | `app/`           | Node.js 20, Express, Redis, prom-client      |
-| Infrastructure | `terraform/`     | Terraform, AWS (VPC, EKS, ECR, IAM/OIDC)     |
-| Packaging      | `helm/saas-app/` | Helm chart (Deployment/Service/Ingress/HPA/PDB) |
-| Cluster extras | `k8s/`           | Redis, NetworkPolicy, HPA, PDB, load test    |
+| Application    | `app/`           | Node.js 22, Express, Redis, prom-client      |
+| Infrastructure | `terraform/`     | Terraform, AWS (VPC, EKS, ECR, ElastiCache, IAM/OIDC) |
+| Packaging      | `helm/saas-app/` | Helm chart, the single source for all app Kubernetes resources |
 | Observability  | `monitoring/`    | Prometheus ServiceMonitor (kube-prometheus-stack) |
 | Automation     | `scripts/`       | Bash bootstrap / teardown                    |
 | CI/CD          | `.github/`       | GitHub Actions                               |

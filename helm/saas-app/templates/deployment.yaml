@@ -5,7 +5,9 @@ metadata:
   labels:
     app: enterprise-devops-app
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       app: enterprise-devops-app
@@ -18,6 +20,15 @@ spec:
         prometheus.io/port: "3000"
         prometheus.io/path: "/metrics"
     spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: enterprise-devops-app
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
@@ -31,21 +42,26 @@ spec:
           ports:
             - containerPort: {{ .Values.service.targetPort }}
           env:
+            {{- $_ := required "env.REDIS_URL is required" .Values.env.REDIS_URL }}
             {{- range $k, $v := .Values.env }}
             - name: {{ $k }}
-              value: "{{ $v }}"
+              value: {{ $v | quote }}
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          # These endpoints check no dependencies, so a Redis outage can't restart pods.
           readinessProbe:
-            httpGet: { path: /health, port: {{ .Values.service.targetPort }} }
-            initialDelaySeconds: 10
+            httpGet: { path: /readyz, port: {{ .Values.service.targetPort }} }
+            initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 2
           livenessProbe:
-            httpGet: { path: /health, port: {{ .Values.service.targetPort }} }
-            initialDelaySeconds: 20
+            httpGet: { path: /livez, port: {{ .Values.service.targetPort }} }
+            initialDelaySeconds: 10
             periodSeconds: 15
+            timeoutSeconds: 2
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]

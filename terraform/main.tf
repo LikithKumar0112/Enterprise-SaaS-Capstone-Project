@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.7.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -23,13 +23,8 @@ terraform {
     }
   }
 
-  backend "s3" {
-    bucket         = "capstone-tf-bucket"
-    key            = "development/terraform.tfstate"
-    region         = "us-east-1"
-    encrypt        = true
-    dynamodb_table = "terraform-state-lock"
-  }
+  # Settings per environment: terraform init -backend-config=backend/<environment>.hcl
+  backend "s3" {}
 }
 
 provider "aws" {
@@ -45,10 +40,11 @@ provider "aws" {
   }
 }
 
+# Changing these arguments replaces the token, which also rotates the earlier value that
+# was exposed through committed plan files.
 resource "random_password" "redis_auth" {
-  length           = 16
-  special          = true
-  override_special = "!#$%&*()-_=+[]{}<>:?"
+  length  = 32
+  special = false
 }
 
 resource "aws_secretsmanager_secret" "app_secrets" {
@@ -94,6 +90,8 @@ module "eks" {
     }
     vpc-cni = {
       most_recent = true
+      # NetworkPolicy objects have no effect unless the CNI enforces them.
+      configuration_values = jsonencode({ enableNetworkPolicy = "true" })
     }
   }
 }
@@ -101,7 +99,7 @@ module "eks" {
 resource "aws_ecr_repository" "app_repository" {
   name                 = "enterprise-devops-app-${var.environment}"
   image_tag_mutability = "IMMUTABLE"
-  force_delete = true
+  force_delete         = true
 
   image_scanning_configuration {
     scan_on_push = true
@@ -140,26 +138,30 @@ resource "aws_ecr_lifecycle_policy" "app_lifecycle" {
   })
 }
 
-resource "aws_elasticache_cluster" "redis" {
+resource "aws_elasticache_replication_group" "redis" {
   count = var.enable_redis ? 1 : 0
 
-  cluster_id           = "devops-redis-${var.environment}"
+  replication_group_id = "devops-redis-${var.environment}"
+  description          = "Application cache for ${var.environment}"
   engine               = "redis"
+  engine_version       = "7.1"
   node_type            = var.redis_node_type
-  num_cache_nodes      = 1
   parameter_group_name = "default.redis7"
-  engine_version       = "7.0"
   port                 = 6379
   subnet_group_name    = aws_elasticache_subnet_group.redis[0].name
   security_group_ids   = [aws_security_group.redis[0].id]
 
-  snapshot_retention_limit = 7
-  maintenance_window       = "sun:05:00-sun:09:00"
+  num_cache_clusters         = var.redis_num_cache_nodes
+  automatic_failover_enabled = var.redis_num_cache_nodes > 1
+  multi_az_enabled           = var.redis_num_cache_nodes > 1
 
-  tags = {
-    Name        = "devops-redis-${var.environment}"
-    Environment = var.environment
-  }
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = true
+  auth_token                 = random_password.redis_auth.result
+
+  snapshot_retention_limit = 1
+  maintenance_window       = "sun:05:00-sun:09:00"
+  apply_immediately        = true
 }
 
 resource "aws_elasticache_subnet_group" "redis" {
@@ -181,7 +183,7 @@ resource "aws_security_group" "redis" {
     from_port       = 6379
     to_port         = 6379
     protocol        = "tcp"
-    security_groups = [module.eks.cluster_primary_security_group_id]
+    security_groups = [module.eks.node_security_group_id]
   }
 
   egress {
@@ -224,37 +226,10 @@ resource "aws_iam_policy" "app_permissions" {
     Statement = [
       {
         Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret"
-        ]
+        Action = ["secretsmanager:GetSecretValue"]
         Resource = [
           aws_secretsmanager_secret.app_secrets.arn
         ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken",
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:GetRepositoryPolicy",
-          "ecr:DescribeRepositories",
-          "ecr:ListImages",
-          "ecr:DescribeImages",
-          "ecr:BatchGetImage"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "cloudwatch:PutMetricData",
-          "cloudwatch:GetMetricData",
-          "cloudwatch:GetMetricStatistics",
-          "cloudwatch:ListMetrics"
-        ]
-        Resource = "*"
       }
     ]
   })
@@ -263,47 +238,6 @@ resource "aws_iam_policy" "app_permissions" {
 resource "aws_iam_role_policy_attachment" "app_permissions" {
   role       = aws_iam_role.app_service_account.name
   policy_arn = aws_iam_policy.app_permissions.arn
-}
-
-resource "aws_cloudwatch_log_group" "app_logs" {
-  name              = "/aws/ecs/enterprise-devops-app-${var.environment}"
-  retention_in_days = 90
-}
-
-resource "aws_cloudwatch_metric_alarm" "high_cpu" {
-  alarm_name          = "eks-high-cpu-${var.environment}"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EKS"
-  period              = "300"
-  statistic           = "Average"
-  threshold           = "80"
-  alarm_description   = "This metric monitors EKS cluster CPU utilization"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
-
-  dimensions = {
-    ClusterName = module.eks.cluster_name
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "low_memory" {
-  alarm_name          = "eks-low-memory-${var.environment}"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "MemoryAvailable"
-  namespace           = "ContainerInsights"
-  period              = "300"
-  statistic           = "Average"
-  threshold           = "1073741824"
-  alarm_description   = "This metric monitors available memory"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
-
-  dimensions = {
-    ClusterName = module.eks.cluster_name
-  }
 }
 
 resource "aws_sns_topic" "alerts" {
@@ -357,8 +291,23 @@ output "ecr_repository_url" {
 }
 
 output "redis_endpoint" {
-  value       = var.enable_redis ? aws_elasticache_cluster.redis[0].cache_nodes[0].address : null
-  description = "Redis endpoint"
+  value       = var.enable_redis ? aws_elasticache_replication_group.redis[0].primary_endpoint_address : null
+  description = "Redis primary endpoint (TLS, requires the auth token)"
+}
+
+output "vpc_id" {
+  value       = module.vpc.vpc_id
+  description = "VPC ID, needed by the AWS Load Balancer Controller"
+}
+
+output "cluster_name" {
+  value       = module.eks.cluster_name
+  description = "EKS cluster name"
+}
+
+output "app_role_arn" {
+  value       = aws_iam_role.app_service_account.arn
+  description = "IAM role for the app's Kubernetes ServiceAccount"
 }
 
 output "sns_topic_arn" {

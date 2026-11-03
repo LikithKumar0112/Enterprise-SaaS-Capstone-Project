@@ -9,5 +9,6 @@
 crash.log
 crash.*.log
 
-# Saved plan files
-tfplan
+# Saved plan files embed a full copy of state, including secrets
+tfplan*
+*.tfplan

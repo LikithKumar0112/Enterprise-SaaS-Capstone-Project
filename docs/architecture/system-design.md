@@ -71,28 +71,23 @@ Provisioned by `terraform/modules/eks` (wrapping `terraform-aws-modules/eks ~> 2
 - Core addons managed by EKS: `coredns`, `kube-proxy`, `vpc-cni`. The EBS CSI driver
   is intentionally left out — nothing in the app uses PersistentVolumeClaims, and the
   addon would need its own IRSA role for no benefit here.
-- One **EKS-managed node group** of **SPOT `t3.small`** instances, `min_size = 1`,
-  `desired_size = 2`, `max_size = 3`.
+- Two separate environments, each with its own cluster, VPC, ECR repository, Redis, IAM roles and
+  Terraform state (`terraform/environments/`, `terraform/backend/`):
+  - **Development:** **SPOT `t3.small`** nodes, `min_size = 1`, `desired_size = 3`, `max_size = 4`.
+  - **Production:** on-demand `t3.medium` nodes, `min_size = 2`, `desired_size = 3`, `max_size = 4`.
 
-**Decision — SPOT instances.** `capacity_type = "SPOT"` gives roughly 70% off
-on-demand pricing. The workload is stateless and fronted by an HPA + PodDisruptionBudget,
-so it tolerates the occasional spot reclamation without user-visible downtime.
+**Decision — SPOT instances in development.** `capacity_type = "SPOT"` gives roughly 70% off
+on-demand pricing, and the workload is stateless.
 
-**Decision — `t3.small` with desired_size 2.** A single `t3.small` can only run
-about 11 pods (the ENI/IP limit imposed by the AWS VPC CNI). Once the full
-kube-prometheus-stack (Prometheus, Alertmanager, node-exporter, kube-state-metrics,
-Grafana) is added alongside the app, Redis, and the LB controller, one node isn't
-enough — so the desired count was bumped from 1 to 2. See
+**Decision — three `t3.small` nodes in development.** A single `t3.small` can only run
+about 11 pods (the ENI/IP limit imposed by the AWS VPC CNI). The kube-prometheus-stack, the
+LB controller and the CloudWatch add-on's agents need more than two nodes provide, with room left
+for rolling updates. See
 [troubleshooting](../troubleshooting/common-issues.md) for the symptom this fixed.
 
 ![EKS console — devops-app-development cluster, Active, Kubernetes 1.34](../images/eks-cluster.png)
 
 ![EKS-managed node group — SPOT t3.small worker nodes](../images/node-group.png)
-
-The running workload — app (2 replicas) and Redis (2 replicas) pods, the ClusterIP
-Services, the ALB-backed Ingress, and the HPA — all in the `default` namespace:
-
-![kubectl get nodes/pods/svc/ingress/hpa — the deployed workload](../images/nodes-svc-ingress-hpa.png)
 
 ## Ingress & load balancing
 
@@ -101,7 +96,8 @@ and annotations:
 
 - `alb.ingress.kubernetes.io/scheme: internet-facing`
 - `alb.ingress.kubernetes.io/target-type: ip` — the ALB targets pod IPs directly
-- `alb.ingress.kubernetes.io/healthcheck-path: /health`
+- `alb.ingress.kubernetes.io/healthcheck-path: /readyz`
+- `/metrics` returns 404 at the ALB; Prometheus scrapes it from inside the cluster
 
 The **AWS Load Balancer Controller** (installed via Helm, backed by an IRSA role from
 `terraform/lb-controller-irsa.tf`) watches this Ingress and creates/updates the real
@@ -111,9 +107,7 @@ troubleshooting.
 
 The Service in front of the Deployment is a plain `ClusterIP` (`:80 → :3000`).
 
-The ALB target group registers the pod IPs and health-checks them on `/health`:
-
-![ALB target group — registered pod IP target, healthy on HTTP :3000](../images/target-groups.png)
+The ALB target group registers the pod IPs and health-checks them on `/readyz`.
 
 Hitting the ALB DNS name returns the app's health payload (Redis healthy; the external
 API dependency shown with its circuit breaker open):
@@ -122,22 +116,26 @@ API dependency shown with its circuit breaker open):
 
 ## Container security posture
 
-The Helm Deployment and the raw manifests enforce a **restricted** PodSecurity posture:
+The Helm Deployment enforces a **restricted** PodSecurity posture:
 
 - `runAsNonRoot: true`, `runAsUser: 1001`, `fsGroup: 1001`
-- `allowPrivilegeEscalation: false`
+- `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`
 - `capabilities: drop: ["ALL"]`
 - `seccompProfile: type: RuntimeDefault`
 
 The Docker image (`app/src/Dockerfile`) reinforces this: a multi-stage build that runs
-as UID 1001, strips npm/npx/corepack out of the runtime layer to shrink the CVE surface,
+as UID 1001, pins its base image by digest, strips npm/npx/corepack out of the runtime layer to shrink the CVE surface,
 and uses `dumb-init` as PID 1.
 
 **Decision — restricted PodSecurity.** Running as a locked-down non-root user with no
 Linux capabilities is the baseline required to pass the Trivy image scan (which fails CI
 on CRITICAL/HIGH) and to satisfy the `restricted` Pod Security Standard. A `NetworkPolicy`
-(`k8s/network-policy.yaml`) further limits pod traffic to the app port, Redis, the
-monitoring namespace, and outbound 80/443 (with the instance metadata endpoint blocked).
+(in the Helm chart, enforced by enabling it on the VPC CNI add-on) limits inbound traffic to the ALB
+and the monitoring namespace on the app port, and outbound traffic to DNS, Redis and 80/443 with the
+instance metadata endpoint blocked.
+
+**Application hardening.** Fault-injection and cache endpoints return 404 when `NODE_ENV=production`.
+The rate limiter uses the real client IP behind the ALB (`TRUST_PROXY_HOPS=1`).
 
 `docker exec … whoami` confirms the container process runs as the non-root `nodejs` user:
 
@@ -145,17 +143,19 @@ monitoring namespace, and outbound 80/443 (with the instance metadata endpoint b
 
 ## Data — Redis
 
-Redis runs **in-cluster** (`k8s/redis-deployment.yaml`): a 2-replica Deployment with
-pod anti-affinity, a ConfigMap-mounted `redis.conf` (LRU eviction, AOF persistence to an
-`emptyDir`), and a `redis-service` ClusterIP the app reaches at
-`redis://redis-service:6379`.
+Redis is **Amazon ElastiCache** (`aws_elasticache_replication_group` in `terraform/main.tf`), with TLS
+in transit, encryption at rest and an auth token:
 
-**Decision — in-cluster Redis instead of ElastiCache.** Terraform *can* provision an
-ElastiCache cluster, but it is gated behind `enable_redis` which defaults to `false`.
-A managed `cache.t3.micro` ElastiCache node runs continuously and adds meaningful
-monthly cost; the app uses Redis as a best-effort cache (protected by a circuit breaker),
-so an in-cluster Redis is sufficient and effectively free on top of the existing nodes.
-The ElastiCache path remains available for a production upgrade by flipping the flag.
+- **Development:** one node. It proves the same security path but has no failover.
+- **Production:** primary and replica across two AZs, with Multi-AZ and automatic failover.
+
+**Decision — ElastiCache instead of in-cluster Redis.** Two independent Redis pods behind one Service
+give each request a different cache and no failover. Managed Redis gives real replication at about
+$12 per node per month, and only while the environment is running.
+
+**Decision — Redis is a cache, not a hard dependency.** While it is unavailable the app keeps serving,
+uncached, with `degraded: true` in the response, and reconnects automatically. Probes don't check
+Redis, so an outage can't restart pods or remove them from the ALB. `/health` still reports it.
 
 ## Observability
 
@@ -164,8 +164,10 @@ namespace, labelled `release: kube-prometheus`) that selects the app Service and
 its `/metrics` endpoint every 15s. The app exposes Prometheus metrics via `prom-client`
 (default process metrics plus `http_requests_total` and `http_request_duration_seconds`).
 The **kube-prometheus-stack** provides Prometheus (scraping) and Grafana (dashboards);
-CloudWatch alarms and an SNS topic (defined in `terraform/main.tf`) cover cluster-level
-CPU/memory alerting.
+The `amazon-cloudwatch-observability` EKS add-on (`terraform/observability.tf`) provides Container
+Insights metrics and ships container stdout through Fluent Bit to
+`/aws/containerinsights/<cluster>/application`. Two alarms on those metrics (`node_cpu_utilization`,
+`node_memory_utilization`) notify an SNS topic.
 
 ![Prometheus target health — the enterprise-devops-app ServiceMonitor target is UP](../images/prometheus-targets.png)
 
@@ -178,27 +180,30 @@ Grafana visualises the scraped metrics — per-pod CPU/memory and request-vs-lim
 
 ![Grafana — cluster capacity, target health and alerts](../images/grafana-cluster-health.png)
 
-Cluster-level alerting is backed by CloudWatch alarms (`terraform/main.tf`) wired to an
-SNS topic:
-
-![CloudWatch — eks-high-cpu and eks-low-memory alarms](../images/cloudwatch-alarms.png)
-
 ### Autoscaling & self-healing
 
-The `HorizontalPodAutoscaler` targets 70% CPU. Generating CPU load (via
-`k8s/cpu-stress.yaml`) drives utilisation up so the HPA adds replicas:
+The `HorizontalPodAutoscaler` targets 70% CPU and 80% memory of the app's own pods, so scaling is
+driven by traffic to the app, such as the k6 load test (`app/tests/load/k6-load.js`).
 
-![CPU-stress pod driving load for the HPA](../images/hpa-load-test.png)
+Probes use `/livez` and `/readyz`, which check no dependencies. On shutdown, the app fails readiness,
+waits for traffic to drain, finishes in-flight requests and then exits.
 
 ## Secrets & identity
 
 - **GitHub Actions → AWS** authenticates via **OIDC** (`terraform/oidc.tf`); no
-  long-lived AWS keys are stored in GitHub. The deploy role trusts the repository's OIDC
-  subject and is granted ECR push, EKS describe, and scoped Terraform-state permissions.
-- **App → AWS** uses **IRSA**: the `enterprise-devops-app` service account assumes an IAM
-  role scoped to reading its Secrets Manager secret and publishing CloudWatch metrics.
-- The Redis auth token is generated by Terraform (`random_password`) and stored in
-  **AWS Secrets Manager**, not baked into the image.
+  long-lived AWS keys are stored in GitHub. Each environment has its own deploy role, which can be
+  assumed only from that GitHub environment and can push only to that environment's ECR repository.
+  The development role can also be assumed by pull requests, for `terraform plan`.
+- **App → AWS** uses **IRSA**: the Helm chart creates the `enterprise-devops-app` ServiceAccount with
+  the role annotation, and that role can only read its own Secrets Manager secret.
+- **Redis auth:** Terraform generates the token (`random_password`), sets it on ElastiCache and stores
+  it in **AWS Secrets Manager**. At startup, `app/src/secrets.js` reads it with the IRSA credentials
+  and passes it to the Redis client. The app refuses to start if it can't read the secret. The token is
+  not in the image, Helm values or Kubernetes objects.
+
+```
+Secrets Manager → IAM role → IRSA ServiceAccount → app startup → TLS + AUTH → ElastiCache
+```
 
 The IAM roles backing IRSA and the GitHub OIDC deploy role:
 

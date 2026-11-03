@@ -6,12 +6,22 @@ metadata:
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+    # Metrics are for Prometheus inside the cluster, not the internet.
+    alb.ingress.kubernetes.io/actions.block-metrics: >-
+      {"type":"fixed-response","fixedResponseConfig":{"contentType":"text/plain","statusCode":"404","messageBody":"Not Found"}}
 spec:
   ingressClassName: alb
   rules:
     - http:
         paths:
+          - path: /metrics
+            pathType: Exact
+            backend:
+              service:
+                name: block-metrics
+                port:
+                  name: use-annotation
           - path: /
             pathType: Prefix
             backend:

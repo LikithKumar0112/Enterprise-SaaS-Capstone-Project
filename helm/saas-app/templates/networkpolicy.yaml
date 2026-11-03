@@ -1,0 +1,62 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: enterprise-devops-app-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: enterprise-devops-app
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # ALB (ip-mode targets connect straight to the pod)
+    - from:
+        {{- range .Values.networkPolicy.albSourceCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+    # Prometheus
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # ElastiCache
+    - to:
+        {{- range .Values.networkPolicy.redisCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 6379
+    # AWS APIs (STS, Secrets Manager) and the external API; metadata endpoint blocked
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+{{- end }}

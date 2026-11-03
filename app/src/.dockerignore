@@ -7,4 +7,6 @@ logs
 tests
 *.md
 .eslintrc.json
-
+junit.xml
+Dockerfile
+.dockerignore

@@ -1,3 +1,4 @@
+process.env.RATE_LIMIT_MAX = '100000';
 const request = require('supertest');
 const app = require('../../src/server');
 const redis = require('redis');
@@ -11,6 +12,10 @@ describe('API Integration Tests', () => {
     });
     await redisClient.connect();
     await redisClient.flushDb();
+    // The app's own connection opens asynchronously; wait until it is usable.
+    while ((await request(app).get('/health')).statusCode !== 200) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   });
 
   afterAll(async () => {

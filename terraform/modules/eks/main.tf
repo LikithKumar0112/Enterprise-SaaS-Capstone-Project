@@ -51,3 +51,5 @@ output "cluster_endpoint" { value = module.eks.cluster_endpoint }
 output "oidc_provider_arn" { value = module.eks.oidc_provider_arn }
 output "oidc_issuer" { value = replace(module.eks.cluster_oidc_issuer_url, "https://", "") }
 output "cluster_primary_security_group_id" { value = module.eks.cluster_primary_security_group_id }
+# Managed nodes, and therefore pods on the VPC CNI, use this group, not the primary one.
+output "node_security_group_id" { value = module.eks.node_security_group_id }

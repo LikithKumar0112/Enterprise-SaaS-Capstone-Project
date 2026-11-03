@@ -44,6 +44,17 @@ describe('Enterprise DevOps Application - Unit Tests', () => {
     });
   });
 
+  describe('Probes', () => {
+    it('should report alive and ready without touching Redis', async () => {
+      const redisClient = require('redis').createClient();
+      redisClient.ping.mockClear();
+
+      expect((await request(app).get('/livez')).statusCode).toEqual(200);
+      expect((await request(app).get('/readyz')).statusCode).toEqual(200);
+      expect(redisClient.ping).not.toHaveBeenCalled();
+    });
+  });
+
   describe('GET /api/v1/products', () => {
     it('should return products with caching metadata', async () => {
       const res = await request(app).get('/api/v1/products');
@@ -53,13 +64,15 @@ describe('Enterprise DevOps Application - Unit Tests', () => {
       expect(res.body.data.length).toBeGreaterThan(0);
     });
 
-    it('should handle Redis errors gracefully', async () => {
+    it('should keep serving, uncached, when Redis fails', async () => {
       const redisClient = require('redis').createClient();
-      redisClient.get.mockRejectedValue(new Error('Redis error'));
-      
+      redisClient.get.mockRejectedValueOnce(new Error('Redis error'));
+
       const res = await request(app).get('/api/v1/products');
-      expect(res.statusCode).toEqual(500);
-      expect(res.body.success).toBe(false);
+      expect(res.statusCode).toEqual(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.cached).toBe(false);
+      expect(res.body.degraded).toBe(true);
     });
   });
 
@@ -109,6 +122,15 @@ describe('Enterprise DevOps Application - Unit Tests', () => {
       const responses = await Promise.all(requests);
       const rateLimited = responses.filter(r => r.statusCode === 429);
       expect(rateLimited.length).toBeGreaterThan(0);
+    });
+
+    it('should never limit probes, /health or /metrics', async () => {
+      // The limit is already exhausted by the previous test.
+      expect((await request(app).get('/')).statusCode).toEqual(429);
+      for (const path of ['/livez', '/readyz', '/metrics', '/health']) {
+        const res = await request(app).get(path);
+        expect(res.statusCode).not.toEqual(429);
+      }
     });
   });
 });

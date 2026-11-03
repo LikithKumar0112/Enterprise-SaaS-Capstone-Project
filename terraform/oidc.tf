@@ -1,12 +1,28 @@
-# GitHub Actions OIDC provider
-data "tls_certificate" "github" {
-  url = "https://token.actions.githubusercontent.com/.well-known/openid-configuration"
+# The account-wide provider is created by terraform/bootstrap.
+data "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
 }
 
-resource "aws_iam_openid_connect_provider" "github" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = [data.tls_certificate.github.certificates[0].sha1_fingerprint]
+# Older state still tracks the provider here. Forget it without deleting it from AWS.
+removed {
+  from = aws_iam_openid_connect_provider.github
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+locals {
+  # Each environment's deploy role can only be assumed by jobs in that GitHub environment.
+  # Terraform plans on pull requests use the development role, which holds no production access.
+  github_oidc_contexts = var.environment == "production" ? ["environment:production"] : ["environment:development", "pull_request"]
+  # GitHub may embed immutable owner/repo IDs in the subject claim, so match both formats.
+  github_oidc_subjects = flatten([
+    for context in local.github_oidc_contexts : [
+      "repo:LikithKumar0112/Enterprise-SaaS-Capstone-Project:${context}",
+      "repo:LikithKumar0112@*/Enterprise-SaaS-Capstone-Project@*:${context}",
+    ]
+  ])
 }
 
 # Deploy role that GitHub Actions assumes
@@ -16,18 +32,12 @@ resource "aws_iam_role" "github_deploy" {
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { Federated = aws_iam_openid_connect_provider.github.arn }
+      Principal = { Federated = data.aws_iam_openid_connect_provider.github.arn }
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
         StringLike = {
-          # GitHub now embeds immutable owner/repo IDs in the subject claim
-          # (repo:OWNER@ownerID/REPO@repoID:...) instead of the plain
-          # repo:OWNER/REPO:... format - match both so this survives either.
-          "token.actions.githubusercontent.com:sub" = [
-            "repo:LikithKumar0112/Enterprise-SaaS-Capstone-Project:*",
-            "repo:LikithKumar0112@*/Enterprise-SaaS-Capstone-Project@*:*",
-          ]
+          "token.actions.githubusercontent.com:sub" = local.github_oidc_subjects
         }
       }
     }]
@@ -88,5 +98,5 @@ resource "aws_iam_role_policy_attachment" "github_deploy_readonly" {
 
 output "github_deploy_role_arn" {
   value       = aws_iam_role.github_deploy.arn
-  description = "Paste this into the AWS_DEPLOY_ROLE_ARN GitHub secret"
+  description = "Set as AWS_DEPLOY_ROLE_ARN: repository secret for development, production environment secret for production"
 }

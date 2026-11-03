@@ -27,11 +27,11 @@ schedule:
 
 **Cause.** With the AWS VPC CNI, the number of pods a node can run is bounded by how many
 IP addresses its instance type's ENIs can hold. A `t3.small` tops out at roughly **11
-pods**. Between the app, in-cluster Redis, the AWS Load Balancer Controller, CoreDNS, and
+pods**. Between the app, in-cluster Redis (since replaced by ElastiCache), the AWS Load Balancer Controller, CoreDNS, and
 the kube-prometheus-stack (Prometheus, Alertmanager, node-exporter, kube-state-metrics,
 Grafana), a single node runs out of IP slots.
 
-**Fix.** Add a second node so there's room for the monitoring stack (`terraform/terraform.tfvars`):
+**Fix.** Add nodes so there's room for the monitoring stack (`terraform/environments/development.tfvars`; the file was `terraform/terraform.tfvars` at the time):
 
 ```hcl
 node_groups = {
